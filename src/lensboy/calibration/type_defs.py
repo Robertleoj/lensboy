@@ -264,7 +264,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
         *,
         title: str = "Coverage",
         s: float = 6.0,
-        grid_cells: int = 60,
+        grid_cells: int = 50,
         return_figure: bool = False,
     ) -> Figure | None:
         """Scatter-plot all detected points with empty grid cells highlighted.
@@ -298,7 +298,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
         *,
         title: str = "Inlier coverage",
         s: float = 6.0,
-        grid_cells: int = 60,
+        grid_cells: int = 50,
         return_figure: bool = False,
     ) -> Figure | None:
         """Scatter-plot inlier detections with empty grid cells highlighted.
@@ -363,12 +363,12 @@ class CalibrationResult(Generic[IntrinsicsT]):
     def plot_distortion_grid(
         self,
         *,
-        grid_cells: int = 60,
+        grid_cells: int = 50,
         fov_fraction: float | None = None,
         ux_max: float | None = None,
         uy_max: float | None = None,
         cmap_name: str = "jet",
-        show_spline_knots: bool = False,
+        show_spline_knots: bool = True,
         return_figure: bool = False,
     ) -> Figure | None:
         """Project a regular grid through a camera model to visualize distortion.
@@ -485,7 +485,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
     def plot_residual_grid(
         self,
         *,
-        grid_cells: int = 60,
+        grid_cells: int = 50,
         arrow_scale: float = 100.0,
         heatmap_max: float | None = None,
         title: str = "Residual grid",

@@ -239,7 +239,7 @@ def plot_detection_coverage(
     image_height: int,
     title: str = "Coverage",
     s: float = 6.0,
-    grid_cells: int = 60,
+    grid_cells: int = 50,
     return_figure: bool = False,
 ) -> Figure | None:
     """Scatter-plot all detected points with empty grid cells highlighted.
@@ -279,7 +279,7 @@ def _plot_inlier_coverage(
     image_height: int,
     title: str = "Inlier coverage",
     s: float = 6.0,
-    grid_cells: int = 60,
+    grid_cells: int = 50,
     return_figure: bool = False,
 ) -> Figure | None:
     """Scatter-plot inlier detections with outliers highlighted in red.
@@ -359,12 +359,12 @@ def _plot_outliers(
 def plot_distortion_grid(
     model: lb.OpenCV | lb.PinholeSplined,
     *,
-    grid_cells: int = 60,
+    grid_cells: int = 50,
     fov_fraction: float | None = None,
     ux_max: float | None = None,
     uy_max: float | None = None,
     cmap_name: str = "jet",
-    show_spline_knots: bool = False,
+    show_spline_knots: bool = True,
     return_figure: bool = False,
 ) -> Figure | None:
     """Project a regular grid through a camera model to visualize distortion.
@@ -988,7 +988,7 @@ def _plot_residual_grid(
     *,
     image_width: int,
     image_height: int,
-    grid_cells: int = 60,
+    grid_cells: int = 50,
     arrow_scale: float = 100.0,
     heatmap_max: float | None = None,
     title: str = "Residual grid",
@@ -1356,7 +1356,7 @@ def plot_undistortion(
     model: lb.PinholeRemapped,
     *,
     image: np.ndarray | None = None,
-    grid_cells: int = 60,
+    grid_cells: int = 50,
     line_thickness: int | None = None,
     return_figure: bool = False,
 ) -> Figure | None:
