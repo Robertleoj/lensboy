@@ -12,6 +12,8 @@ Camera calibration for vision engineers. Maximally powerful, minimally complex.
 
 One job: fit camera models and verify the results. OpenCV models when they work, spline-based distortion when they don't.
 
+> Many of the techniques in this library were originally developed in [mrcal](https://mrcal.secretsauce.net/).
+
 ## Why lensboy
 
 Even for standard OpenCV models, lensboy gives you better calibrations than raw `cv2.calibrateCamera` (see [model comparison notebook](examples/model_comparison.ipynb)):
