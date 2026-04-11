@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass, field, replace
 from importlib.metadata import version as _package_version
@@ -11,6 +12,11 @@ import numpy as np
 from lensboy.camera_models.base_model import CameraModel, CameraModelConfig
 
 K1, K2, P1, P2, K3, K4, K5, K6, S1, S2, S3, S4, TX, TY = range(14)
+_UNDISTORT_POINTS_ITER_CRITERIA = (
+    cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS,
+    100,
+    1e-14,
+)
 
 
 def _mask(*idx: int) -> np.ndarray:
@@ -18,6 +24,11 @@ def _mask(*idx: int) -> np.ndarray:
     if len(idx) > 0:
         m[list(idx)] = True
     return m
+
+
+@functools.lru_cache(maxsize=128)
+def _camera_matrix_cached(fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
+    return np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64)
 
 
 @dataclass
@@ -167,14 +178,13 @@ class OpenCV(CameraModel):
         assert pts.ndim == 2 and pts.shape[1] == 2, (
             f"Expected (N, 2) array, got {pts.shape}"
         )
-        criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-14)
         undistorted = cv2.undistortPointsIter(
             pts.reshape(-1, 1, 2),
-            self.K(),
+            self._camera_matrix_cached(),
             self.distortion_coeffs,
             R=None,  # type: ignore
             P=None,  # type: ignore
-            criteria=criteria,
+            criteria=_UNDISTORT_POINTS_ITER_CRITERIA,
         ).reshape(-1, 2)
         return np.column_stack([undistorted, np.ones(len(undistorted))])
 
@@ -200,13 +210,21 @@ class OpenCV(CameraModel):
             points_in_cam,
             rvec=np.zeros(3),
             tvec=np.zeros(3),
-            cameraMatrix=self.K(),
+            cameraMatrix=self._camera_matrix_cached(),
             distCoeffs=self.distortion_coeffs,
         )[0].reshape(-1, 2)
 
     def K(self):
         """Return the 3x3 camera intrinsics matrix."""
-        return np.array([[self.fx, 0, self.cx], [0, self.fy, self.cy], [0, 0, 1]])
+        return self._camera_matrix_cached().copy()
+
+    def _camera_matrix_cached(self) -> np.ndarray:
+        return _camera_matrix_cached(
+            float(self.fx),
+            float(self.fy),
+            float(self.cx),
+            float(self.cy),
+        )
 
     @property
     def fov_deg_x(self) -> float:

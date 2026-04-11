@@ -5,9 +5,14 @@ build/
 dist/
 wheels/
 *.egg-info
+**/__marimo__/
+site/
 
 # Virtual environments
 .venv
+
+# Mac system files
+**/.DS_Store
 
 .cache
 
