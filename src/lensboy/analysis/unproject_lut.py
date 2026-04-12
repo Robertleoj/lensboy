@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
 from lensboy.camera_models.unproject_lut import InterpolationMode, UnprojectLUT
 
 if TYPE_CHECKING:
-    from matplotlib.figure import Figure
-
     from lensboy.camera_models.base_model import CameraModel
+
+_NormalizePointsFn = Callable[[np.ndarray], np.ndarray]
 
 _SUPPORTED_INTERPOLATIONS: tuple[InterpolationMode, ...] = (
     "nearest",
@@ -68,53 +67,6 @@ def _normalize_interpolations(
     if len(normalized) == 0:
         raise ValueError("interpolations must be non-empty.")
     return tuple(normalized)
-
-
-def _serialize_source_model_spec(source_model_spec: dict[str, Any] | None) -> str | None:
-    if source_model_spec is None:
-        return None
-    return json.dumps(
-        source_model_spec,
-        separators=(",", ":"),
-        sort_keys=True,
-        ensure_ascii=True,
-    )
-
-
-def _make_camera_model_from_spec(source_model_spec: dict[str, Any]) -> CameraModel:
-    model_type = source_model_spec.get("type")
-    if model_type == "opencv":
-        from lensboy.camera_models.opencv import OpenCV
-
-        return OpenCV.from_json(source_model_spec)
-    if model_type == "pinhole_splined":
-        from lensboy.camera_models.pinhole_splined import PinholeSplined
-
-        return PinholeSplined.from_json(source_model_spec)
-    raise ValueError(f"Unsupported source_model_spec type {model_type!r}.")
-
-
-def _make_normalize_points_fn(
-    source_model_spec_json: str,
-) -> Callable[[np.ndarray], np.ndarray]:
-    source_model_spec = json.loads(source_model_spec_json)
-    model_type = source_model_spec.get("type")
-    if model_type == "pinhole_remapped":
-        fx = float(source_model_spec["fx"])
-        fy = float(source_model_spec["fy"])
-        cx = float(source_model_spec["cx"])
-        cy = float(source_model_spec["cy"])
-
-        def normalize_points(pixel_coords: np.ndarray) -> np.ndarray:
-            pts = np.asarray(pixel_coords, dtype=np.float64)
-            x = (pts[:, 0] - cx) / fx
-            y = (pts[:, 1] - cy) / fy
-            return np.column_stack([x, y, np.ones(len(pts), dtype=np.float64)])
-
-        return normalize_points
-
-    model = _make_camera_model_from_spec(source_model_spec)
-    return model.normalize_points
 
 
 def _angular_error_deg_from_xy(
@@ -651,363 +603,245 @@ class UnprojectLUTErrorHeatmap:
             )
 
 
-@dataclass
-class UnprojectLUTAnalyzer:
-    """Estimate accuracy statistics and heatmaps for a saved LUT.
+def estimate_lut_accuracy(
+    lut: UnprojectLUT,
+    model: CameraModel,
+    *,
+    interpolations: InterpolationMode
+    | tuple[InterpolationMode, ...]
+    | list[InterpolationMode] = "bilinear",
+    mode: str = "adaptive",
+    max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
+    min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
+) -> UnprojectLUTAccuracyReport:
+    """Estimate angular interpolation accuracy for one or more modes.
 
     Args:
         lut: Runtime LUT to analyze.
+        model: The exact camera model the LUT was built from.
+        interpolations: Interpolation modes to include in the report.
+        mode: Error-estimation mode. Only ``"adaptive"`` is supported.
+        max_depth: Maximum adaptive subdivision depth.
+        min_cell_size: Minimum subcell size in pixels.
 
     Returns:
-        Analyzer that can compute error summaries and heatmaps using the LUT's
-        embedded exact source-model specification.
+        Accuracy report for the requested interpolation modes.
     """
-
-    lut: UnprojectLUT
-    _normalize_points_exact_fn: Callable[[np.ndarray], np.ndarray] | None = field(
-        default=None,
-        init=False,
-        repr=False,
+    normalized_interpolations = _normalize_interpolations(interpolations)
+    mode = _validate_error_mode(mode)
+    max_errors_mdeg, median_errors_mdeg = _estimate_adaptive_errors(
+        lut,
+        model.normalize_points,
+        interpolations=normalized_interpolations,
+        max_depth=max_depth,
+        min_cell_size=min_cell_size,
+    )
+    return UnprojectLUTAccuracyReport(
+        interpolations=normalized_interpolations,
+        max_angular_error_mdeg=max_errors_mdeg,
+        median_angular_error_mdeg=median_errors_mdeg,
+        mode=mode,
+        max_depth=max_depth,
+        min_cell_size=min_cell_size,
     )
 
-    def estimate_accuracy(
-        self,
-        *,
-        interpolations: InterpolationMode
-        | tuple[InterpolationMode, ...]
-        | list[InterpolationMode] = "bilinear",
-        mode: str = "adaptive",
-        max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
-        min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
-    ) -> UnprojectLUTAccuracyReport:
-        """Estimate angular interpolation accuracy for one or more modes.
 
-        Args:
-            interpolations: Interpolation modes to include in the report.
-            mode: Error-estimation mode. Only ``"adaptive"`` is supported.
-            max_depth: Maximum adaptive subdivision depth.
-            min_cell_size: Minimum subcell size in pixels.
+def compute_lut_error_heatmap(
+    lut: UnprojectLUT,
+    model: CameraModel,
+    *,
+    interpolation: InterpolationMode = "bilinear",
+    mode: str = "adaptive",
+    max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
+    min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
+) -> UnprojectLUTErrorHeatmap:
+    """Compute a per-cell error heatmap for one interpolation mode.
 
-        Returns:
-            Accuracy report for the requested interpolation modes.
-        """
-        normalized_interpolations = _normalize_interpolations(interpolations)
-        mode = _validate_error_mode(mode)
-        max_errors_mdeg, median_errors_mdeg = self._estimate_adaptive_errors(
-            interpolations=normalized_interpolations,
-            max_depth=max_depth,
-            min_cell_size=min_cell_size,
-        )
-        return UnprojectLUTAccuracyReport(
-            interpolations=normalized_interpolations,
-            max_angular_error_mdeg=max_errors_mdeg,
-            median_angular_error_mdeg=median_errors_mdeg,
-            mode=mode,
-            max_depth=max_depth,
-            min_cell_size=min_cell_size,
-        )
+    Args:
+        lut: Runtime LUT to analyze.
+        model: The exact camera model the LUT was built from.
+        interpolation: Interpolation mode to evaluate.
+        mode: Error-estimation mode. Only ``"adaptive"`` is supported.
+        max_depth: Maximum adaptive subdivision depth.
+        min_cell_size: Minimum subcell size in pixels.
 
-    def compute_error_heatmap(
-        self,
-        *,
-        interpolation: InterpolationMode = "bilinear",
-        mode: str = "adaptive",
-        max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
-        min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
-    ) -> UnprojectLUTErrorHeatmap:
-        """Compute a per-cell error heatmap for one interpolation mode.
+    Returns:
+        In-memory heatmap for the requested interpolation mode.
+    """
+    interpolation = _validate_interpolation_mode(interpolation)
+    _validate_error_mode(mode)
+    normalize_points_fn = model.normalize_points
 
-        Args:
-            interpolation: Interpolation mode to evaluate.
-            mode: Error-estimation mode. Only ``"adaptive"`` is supported.
-            max_depth: Maximum adaptive subdivision depth.
-            min_cell_size: Minimum subcell size in pixels.
+    x_edges = np.linspace(lut.grid_x_min, lut.grid_x_max, lut.grid_width)
+    y_edges = np.linspace(lut.grid_y_min, lut.grid_y_max, lut.grid_height)
+    heatmap_width = max(lut.grid_width - 1, 1)
+    heatmap_height = max(lut.grid_height - 1, 1)
+    max_angular_error_deg = np.zeros((heatmap_height, heatmap_width), dtype=np.float64)
+    error_direction_xy = np.zeros((heatmap_height, heatmap_width, 2), dtype=np.float64)
+    error_delta_xy = np.zeros((heatmap_height, heatmap_width, 2), dtype=np.float64)
+    peak_pixel_xy = np.zeros((heatmap_height, heatmap_width, 2), dtype=np.float64)
 
-        Returns:
-            In-memory heatmap for the requested interpolation mode.
-        """
-        interpolation = _validate_interpolation_mode(interpolation)
-        _validate_error_mode(mode)
-
-        x_edges = np.linspace(
-            self.lut.grid_x_min, self.lut.grid_x_max, self.lut.grid_width
-        )
-        y_edges = np.linspace(
-            self.lut.grid_y_min, self.lut.grid_y_max, self.lut.grid_height
-        )
-        heatmap_width = max(self.lut.grid_width - 1, 1)
-        heatmap_height = max(self.lut.grid_height - 1, 1)
-        max_angular_error_deg = np.zeros(
-            (heatmap_height, heatmap_width), dtype=np.float64
-        )
-        error_direction_xy = np.zeros(
-            (heatmap_height, heatmap_width, 2), dtype=np.float64
-        )
-        error_delta_xy = np.zeros((heatmap_height, heatmap_width, 2), dtype=np.float64)
-        peak_pixel_xy = np.zeros((heatmap_height, heatmap_width, 2), dtype=np.float64)
-
-        normalize_points_fn = self._normalize_points_exact()
-        for iy in range(heatmap_height):
-            y0 = y_edges[min(iy, len(y_edges) - 1)]
-            y1 = y_edges[min(iy + 1, len(y_edges) - 1)]
-            for ix in range(heatmap_width):
-                x0 = x_edges[min(ix, len(x_edges) - 1)]
-                x1 = x_edges[min(ix + 1, len(x_edges) - 1)]
-                (
-                    max_error,
-                    direction_xy,
-                    delta_xy,
-                    peak_pixel,
-                ) = _estimate_cell_error_detail(
-                    self.lut,
-                    normalize_points_fn,
-                    mode=interpolation,
-                    x0=x0,
-                    x1=x1,
-                    y0=y0,
-                    y1=y1,
-                    depth=0,
-                    max_depth=max_depth,
-                    min_cell_size=min_cell_size,
-                    sampled_errors_deg=[],
-                )
-                max_angular_error_deg[iy, ix] = max_error
-                error_direction_xy[iy, ix] = direction_xy
-                error_delta_xy[iy, ix] = delta_xy
-                peak_pixel_xy[iy, ix] = peak_pixel
-
-        return UnprojectLUTErrorHeatmap(
-            interpolation=interpolation,
-            max_depth=max_depth,
-            min_cell_size=min_cell_size,
-            cell_x_edges=x_edges,
-            cell_y_edges=y_edges,
-            max_angular_error_deg=max_angular_error_deg,
-            error_direction_xy=error_direction_xy,
-            error_delta_xy=error_delta_xy,
-            peak_pixel_xy=peak_pixel_xy,
-        )
-
-    def sample_accuracy_grid(
-        self,
-        *,
-        interpolation: InterpolationMode = "bilinear",
-        target_sample_count: int = 2500,
-    ) -> UnprojectLUTSampleAccuracy:
-        """Sample LUT accuracy on an evenly spaced image grid.
-
-        Args:
-            interpolation: Interpolation mode to evaluate.
-            target_sample_count: Approximate number of evenly spaced sample pixels.
-
-        Returns:
-            Dense sampled comparison result between the LUT and the exact source
-            model.
-        """
-        interpolation = _validate_interpolation_mode(interpolation)
-        target_sample_count = _validate_target_sample_count(target_sample_count)
-        (
-            sample_grid_width,
-            sample_grid_height,
-            sample_pixels,
-        ) = _dense_sample_grid(
-            image_width=self.lut.image_width,
-            image_height=self.lut.image_height,
-            target_sample_count=target_sample_count,
-        )
-        exact_rays = self._normalize_points_exact()(sample_pixels)
-        approx_rays = cast(
-            np.ndarray,
-            self.lut.normalize_points(
-                sample_pixels,
-                interpolation=interpolation,
-                bounds="strict",
-            ),
-        )
-        angular_error_deg = _angular_error_deg_from_xy(
-            np.asarray(exact_rays[:, :2], dtype=np.float64),
-            np.asarray(approx_rays[:, :2], dtype=np.float64),
-        )
-        return UnprojectLUTSampleAccuracy(
-            interpolation=interpolation,
-            target_sample_count=target_sample_count,
-            sample_grid_width=sample_grid_width,
-            sample_grid_height=sample_grid_height,
-            sample_pixels=sample_pixels,
-            exact_rays=exact_rays,
-            approx_rays=approx_rays,
-            angular_error_deg=angular_error_deg,
-        )
-
-    def save_error_heatmap(
-        self,
-        path: Path | str,
-        *,
-        interpolation: InterpolationMode = "bilinear",
-        mode: str = "adaptive",
-        max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
-        min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
-    ) -> None:
-        """Compute and save a heatmap archive.
-
-        Args:
-            path: Output `.npz` path.
-            interpolation: Interpolation mode to evaluate.
-            mode: Error-estimation mode. Only ``"adaptive"`` is supported.
-            max_depth: Maximum adaptive subdivision depth.
-            min_cell_size: Minimum subcell size in pixels.
-
-        Returns:
-            None.
-        """
-        heatmap = self.compute_error_heatmap(
-            interpolation=interpolation,
-            mode=mode,
-            max_depth=max_depth,
-            min_cell_size=min_cell_size,
-        )
-        heatmap.save(path)
-
-    def plot_error_heatmap(
-        self,
-        *,
-        interpolation: InterpolationMode = "bilinear",
-        mode: str = "adaptive",
-        max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
-        min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
-        title: str | None = None,
-        angular_unit: Literal["deg", "mdeg", "udeg", "rad", "mrad", "urad"] = "mdeg",
-        show_directions: bool = True,
-        arrow_grid: int = 28,
-        arrow_scale: float = 0.5,
-        cmap_name: str = "inferno",
-        figsize: tuple[float, float] = (8.5, 6.0),
-        return_figure: bool = False,
-    ) -> Figure | None:
-        """Compute and plot a heatmap for one interpolation mode.
-
-        Args:
-            interpolation: Interpolation mode to evaluate.
-            mode: Error-estimation mode. Only ``"adaptive"`` is supported.
-            max_depth: Maximum adaptive subdivision depth.
-            min_cell_size: Minimum subcell size in pixels.
-            title: Plot title override.
-            angular_unit: Angular units for the color scale.
-            show_directions: Whether to draw the error-direction arrows.
-            arrow_grid: Approximate maximum number of arrows along the longer axis.
-            arrow_scale: Arrow length as a fraction of the spacing between arrows.
-            cmap_name: Matplotlib colormap name.
-            figsize: Figure size in inches as ``(width, height)``.
-            return_figure: If True, return the figure instead of calling ``plt.show()``.
-
-        Returns:
-            The figure if ``return_figure`` is True, otherwise None.
-        """
-        heatmap = self.compute_error_heatmap(
-            interpolation=interpolation,
-            mode=mode,
-            max_depth=max_depth,
-            min_cell_size=min_cell_size,
-        )
-        from lensboy.analysis.plots import plot_unproject_lut_error_heatmap
-
-        return plot_unproject_lut_error_heatmap(
-            heatmap,
-            title=title,
-            angular_unit=angular_unit,
-            show_directions=show_directions,
-            arrow_grid=arrow_grid,
-            arrow_scale=arrow_scale,
-            cmap_name=cmap_name,
-            figsize=figsize,
-            return_figure=return_figure,
-        )
-
-    def _require_source_model_spec_json(self) -> str:
-        source_model_spec_json = _serialize_source_model_spec(self.lut.source_model_spec)
-        if source_model_spec_json is None:
-            raise ValueError(
-                "This LUT does not carry source_model_spec_json, so exact accuracy "
-                "analysis is unavailable."
-            )
-        return source_model_spec_json
-
-    def _normalize_points_exact(self) -> Callable[[np.ndarray], np.ndarray]:
-        if self._normalize_points_exact_fn is None:
-            self._normalize_points_exact_fn = _make_normalize_points_fn(
-                self._require_source_model_spec_json()
-            )
-        return self._normalize_points_exact_fn
-
-    def _estimate_adaptive_errors(
-        self,
-        *,
-        interpolations: tuple[InterpolationMode, ...],
-        max_depth: int,
-        min_cell_size: float,
-    ) -> tuple[dict[str, float], dict[str, float]]:
-        max_errors_mdeg: dict[str, float] = {}
-        median_errors_mdeg: dict[str, float] = {}
-        normalize_points_fn = self._normalize_points_exact()
-
-        if self.lut.grid_width == 1 and self.lut.grid_height == 1:
-            sample_points = np.array(
-                [[self.lut.grid_x_min, self.lut.grid_y_min]],
-                dtype=np.float64,
-            )
-            exact_rays = normalize_points_fn(sample_points)
-            exact_xy = np.asarray(exact_rays[:, :2], dtype=np.float64)
-            for mode in interpolations:
-                approx_xy = self.lut._interpolate_xy(
-                    sample_points[:, 0],
-                    sample_points[:, 1],
-                    mode,
-                    "strict",
-                )
-                sample_errors_deg = _angular_error_deg_from_xy(exact_xy, approx_xy)
-                max_errors_mdeg[mode] = (
-                    float(np.max(sample_errors_deg)) * _ANGULAR_ERROR_MDEG_SCALE
-                )
-                median_errors_mdeg[mode] = (
-                    float(np.median(sample_errors_deg)) * _ANGULAR_ERROR_MDEG_SCALE
-                )
-            return max_errors_mdeg, median_errors_mdeg
-
-        x_edges = np.linspace(
-            self.lut.grid_x_min, self.lut.grid_x_max, self.lut.grid_width
-        )
-        y_edges = np.linspace(
-            self.lut.grid_y_min, self.lut.grid_y_max, self.lut.grid_height
-        )
-        x0_cells = x_edges[: max(self.lut.grid_width - 1, 1)]
-        x1_cells = x_edges[1:] if self.lut.grid_width > 1 else x_edges[:1]
-        y0_cells = y_edges[: max(self.lut.grid_height - 1, 1)]
-        y1_cells = y_edges[1:] if self.lut.grid_height > 1 else y_edges[:1]
-        cell_x0, cell_y0 = np.meshgrid(x0_cells, y0_cells, indexing="xy")
-        cell_x1, cell_y1 = np.meshgrid(x1_cells, y1_cells, indexing="xy")
-        flat_x0 = cell_x0.ravel()
-        flat_x1 = cell_x1.ravel()
-        flat_y0 = cell_y0.ravel()
-        flat_y1 = cell_y1.ravel()
-
-        for mode in interpolations:
-            max_error, sampled_errors_deg = _estimate_adaptive_errors_for_cell_chunk(
-                self.lut,
+    for iy in range(heatmap_height):
+        y0 = y_edges[min(iy, len(y_edges) - 1)]
+        y1 = y_edges[min(iy + 1, len(y_edges) - 1)]
+        for ix in range(heatmap_width):
+            x0 = x_edges[min(ix, len(x_edges) - 1)]
+            x1 = x_edges[min(ix + 1, len(x_edges) - 1)]
+            (
+                max_error,
+                direction_xy,
+                delta_xy,
+                peak_pixel,
+            ) = _estimate_cell_error_detail(
+                lut,
                 normalize_points_fn,
-                mode=mode,
-                x0=flat_x0,
-                x1=flat_x1,
-                y0=flat_y0,
-                y1=flat_y1,
+                mode=interpolation,
+                x0=x0,
+                x1=x1,
+                y0=y0,
+                y1=y1,
+                depth=0,
                 max_depth=max_depth,
                 min_cell_size=min_cell_size,
+                sampled_errors_deg=[],
             )
-            median_error = (
-                float(np.median(sampled_errors_deg))
-                if len(sampled_errors_deg) > 0
-                else float("nan")
-            )
-            max_errors_mdeg[mode] = max_error * _ANGULAR_ERROR_MDEG_SCALE
-            median_errors_mdeg[mode] = median_error * _ANGULAR_ERROR_MDEG_SCALE
+            max_angular_error_deg[iy, ix] = max_error
+            error_direction_xy[iy, ix] = direction_xy
+            error_delta_xy[iy, ix] = delta_xy
+            peak_pixel_xy[iy, ix] = peak_pixel
 
+    return UnprojectLUTErrorHeatmap(
+        interpolation=interpolation,
+        max_depth=max_depth,
+        min_cell_size=min_cell_size,
+        cell_x_edges=x_edges,
+        cell_y_edges=y_edges,
+        max_angular_error_deg=max_angular_error_deg,
+        error_direction_xy=error_direction_xy,
+        error_delta_xy=error_delta_xy,
+        peak_pixel_xy=peak_pixel_xy,
+    )
+
+
+def sample_lut_accuracy(
+    lut: UnprojectLUT,
+    model: CameraModel,
+    *,
+    interpolation: InterpolationMode = "bilinear",
+    target_sample_count: int = 2500,
+) -> UnprojectLUTSampleAccuracy:
+    """Sample LUT accuracy on an evenly spaced image grid.
+
+    Args:
+        lut: Runtime LUT to analyze.
+        model: The exact camera model the LUT was built from.
+        interpolation: Interpolation mode to evaluate.
+        target_sample_count: Approximate number of evenly spaced sample pixels.
+
+    Returns:
+        Dense sampled comparison between the LUT and the exact model.
+    """
+    interpolation = _validate_interpolation_mode(interpolation)
+    target_sample_count = _validate_target_sample_count(target_sample_count)
+    (
+        sample_grid_width,
+        sample_grid_height,
+        sample_pixels,
+    ) = _dense_sample_grid(
+        image_width=lut.image_width,
+        image_height=lut.image_height,
+        target_sample_count=target_sample_count,
+    )
+    exact_rays = model.normalize_points(sample_pixels)
+    approx_rays = cast(
+        np.ndarray,
+        lut.normalize_points(
+            sample_pixels,
+            interpolation=interpolation,
+            bounds="strict",
+        ),
+    )
+    angular_error_deg = _angular_error_deg_from_xy(
+        np.asarray(exact_rays[:, :2], dtype=np.float64),
+        np.asarray(approx_rays[:, :2], dtype=np.float64),
+    )
+    return UnprojectLUTSampleAccuracy(
+        interpolation=interpolation,
+        target_sample_count=target_sample_count,
+        sample_grid_width=sample_grid_width,
+        sample_grid_height=sample_grid_height,
+        sample_pixels=sample_pixels,
+        exact_rays=exact_rays,
+        approx_rays=approx_rays,
+        angular_error_deg=angular_error_deg,
+    )
+
+
+def _estimate_adaptive_errors(
+    lut: UnprojectLUT,
+    normalize_points_fn: _NormalizePointsFn,
+    *,
+    interpolations: tuple[InterpolationMode, ...],
+    max_depth: int,
+    min_cell_size: float,
+) -> tuple[dict[str, float], dict[str, float]]:
+    max_errors_mdeg: dict[str, float] = {}
+    median_errors_mdeg: dict[str, float] = {}
+
+    if lut.grid_width == 1 and lut.grid_height == 1:
+        sample_points = np.array(
+            [[lut.grid_x_min, lut.grid_y_min]],
+            dtype=np.float64,
+        )
+        exact_rays = normalize_points_fn(sample_points)
+        exact_xy = np.asarray(exact_rays[:, :2], dtype=np.float64)
+        for mode in interpolations:
+            approx_xy = lut._interpolate_xy(
+                sample_points[:, 0],
+                sample_points[:, 1],
+                mode,
+                "strict",
+            )
+            sample_errors_deg = _angular_error_deg_from_xy(exact_xy, approx_xy)
+            max_errors_mdeg[mode] = (
+                float(np.max(sample_errors_deg)) * _ANGULAR_ERROR_MDEG_SCALE
+            )
+            median_errors_mdeg[mode] = (
+                float(np.median(sample_errors_deg)) * _ANGULAR_ERROR_MDEG_SCALE
+            )
         return max_errors_mdeg, median_errors_mdeg
+
+    x_edges = np.linspace(lut.grid_x_min, lut.grid_x_max, lut.grid_width)
+    y_edges = np.linspace(lut.grid_y_min, lut.grid_y_max, lut.grid_height)
+    x0_cells = x_edges[: max(lut.grid_width - 1, 1)]
+    x1_cells = x_edges[1:] if lut.grid_width > 1 else x_edges[:1]
+    y0_cells = y_edges[: max(lut.grid_height - 1, 1)]
+    y1_cells = y_edges[1:] if lut.grid_height > 1 else y_edges[:1]
+    cell_x0, cell_y0 = np.meshgrid(x0_cells, y0_cells, indexing="xy")
+    cell_x1, cell_y1 = np.meshgrid(x1_cells, y1_cells, indexing="xy")
+    flat_x0 = cell_x0.ravel()
+    flat_x1 = cell_x1.ravel()
+    flat_y0 = cell_y0.ravel()
+    flat_y1 = cell_y1.ravel()
+
+    for mode in interpolations:
+        max_error, sampled_errors_deg = _estimate_adaptive_errors_for_cell_chunk(
+            lut,
+            normalize_points_fn,
+            mode=mode,
+            x0=flat_x0,
+            x1=flat_x1,
+            y0=flat_y0,
+            y1=flat_y1,
+            max_depth=max_depth,
+            min_cell_size=min_cell_size,
+        )
+        median_error = (
+            float(np.median(sampled_errors_deg))
+            if len(sampled_errors_deg) > 0
+            else float("nan")
+        )
+        max_errors_mdeg[mode] = max_error * _ANGULAR_ERROR_MDEG_SCALE
+        median_errors_mdeg[mode] = median_error * _ANGULAR_ERROR_MDEG_SCALE
+
+    return max_errors_mdeg, median_errors_mdeg

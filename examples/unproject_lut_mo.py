@@ -23,9 +23,11 @@ with app.setup(hide_code=True):
 
     import lensboy as lb
     from lensboy.analysis import (
-        UnprojectLUTAnalyzer,
         UnprojectLUTErrorHeatmap,
+        compute_lut_error_heatmap,
+        estimate_lut_accuracy,
         plot_unproject_lut_error_heatmap,
+        sample_lut_accuracy,
     )
 
 
@@ -34,9 +36,14 @@ def _():
     mo.md("""
     # Unproject LUT (LookUp Table) example
 
-    The function which goes from pixel location to 3D ray is called `unproject()`. It is usually not possible to compute in closed form, so it must be iteratively approximated. Unfortunately, this process is slow, which can be a problem for some applications.
+    The function which goes from pixel location to 3D ray is called
+    `unproject()`. It is usually not possible to compute in closed form,
+    so it must be iteratively approximated. Unfortunately, this process
+    is slow, which can be a problem for some applications.
 
-    Lensboy allows you to precompute these values once ahead of time, for fast lookup during operation. The runtime LUT stays compact and fast, while the accuracy analysis is available separately on demand.
+    Lensboy allows you to precompute these values once ahead of time,
+    for fast lookup during operation. The runtime LUT stays compact and
+    fast, while the accuracy analysis is available separately on demand.
 
     This notebook builds a `.unproject_LUT` file from the bundled OpenCV test
     calibration, saves it to `examples/generated/`, reloads it, and compares the
@@ -80,7 +87,8 @@ def _():
     mo.md(r"""
     ## Compute the lookup table
 
-    Use the drop-down widget below to provide paramters for how the LUT is created and used.
+    Use the drop-down widget below to provide paramters for how the
+    LUT is created and used.
     """)
     return
 
@@ -112,32 +120,21 @@ def _():
         value="float32_xy",
         label="Storage encoding",
     )
-    num_workers_widget = mo.ui.slider(
-        start=1,
-        step=1,
-        stop=64,
-        value=8,
-        label="Number of workers",
-        show_value=True,
-        debounce=True,
-    )
     controls_ui = mo.vstack(
         [
             pixel_stride_widget,
             storage_encoding_widget,
-            num_workers_widget,
         ]
     )
     controls_ui
-    return num_workers_widget, pixel_stride_widget, storage_encoding_widget
+    return pixel_stride_widget, storage_encoding_widget
 
 
 @app.cell(hide_code=True)
-def _(num_workers_widget, pixel_stride_widget, storage_encoding_widget):
+def _(pixel_stride_widget, storage_encoding_widget):
     controls = SimpleNamespace(
         pixel_stride=float(pixel_stride_widget.value),
         storage_encoding=storage_encoding_widget.value,
-        num_workers=num_workers_widget.value,
     )
     return (controls,)
 
@@ -148,7 +145,6 @@ def _(controls, model):
     lut = model.get_unproject_lut(
         pixel_stride=controls.pixel_stride,
         storage_encoding=controls.storage_encoding,
-        num_workers=controls.num_workers,
     )
     return (lut,)
 
@@ -163,7 +159,10 @@ def _():
 
 @app.cell
 def _(controls, lut, output_dir):
-    lut_filename = f"opencv_stride_{int(controls.pixel_stride)}_{controls.storage_encoding}.unproject_LUT"
+    lut_filename = (
+        f"opencv_stride_{int(controls.pixel_stride)}"
+        f"_{controls.storage_encoding}.unproject_LUT"
+    )
     lut_path = output_dir / lut_filename
 
     lut.save(lut_path)
@@ -203,9 +202,8 @@ def _(loaded, lut_path, repo_root):
 
 
 @app.cell
-def _(loaded):
-    analyzer = UnprojectLUTAnalyzer(loaded)
-    return (analyzer,)
+def _():
+    return
 
 
 @app.cell(hide_code=True)
@@ -238,21 +236,27 @@ def _(accuracy_report, interpolation_mode, sample_accuracy):
     Queried `{sample_accuracy.sample_count}` evenly spaced pixels with
     `{interpolation_mode}` interpolation.
 
-    - sample grid: `{sample_accuracy.sample_grid_width} x {sample_accuracy.sample_grid_height}`
-    - max observed angular error on this sample: `{sample_accuracy.max_angular_error_mdeg:.3f} milli degrees`
-    - mean angular error on this sample: `{sample_accuracy.mean_angular_error_mdeg:.3f} milli degrees`
-    - analyzer-estimated max for `{interpolation_mode}`: `{accuracy_report.max_angular_error_mdeg[interpolation_mode]:.3f} milli degrees`
-    - analyzer-estimated median for `{interpolation_mode}`: `{accuracy_report.median_angular_error_mdeg[interpolation_mode]:.3f} milli degrees`
+    - sample grid: `{sample_accuracy.sample_grid_width} x \
+{sample_accuracy.sample_grid_height}`
+    - max observed angular error on this sample: \
+`{sample_accuracy.max_angular_error_mdeg:.3f} mdeg`
+    - mean angular error on this sample: \
+`{sample_accuracy.mean_angular_error_mdeg:.3f} mdeg`
+    - analyzer-estimated max for `{interpolation_mode}`: \
+`{accuracy_report.max_angular_error_mdeg[interpolation_mode]:.3f} mdeg`
+    - analyzer-estimated median for `{interpolation_mode}`: \
+`{accuracy_report.median_angular_error_mdeg[interpolation_mode]:.3f} mdeg`
     """)
     return
 
 
 @app.cell
-def _(analyzer, interpolation_mode):
-    accuracy_report = analyzer.estimate_accuracy(interpolations=interpolation_mode)
-    sample_accuracy = analyzer.sample_accuracy_grid(
-        interpolation=interpolation_mode,
-        target_sample_count=2500,
+def _(loaded, model, interpolation_mode):
+    accuracy_report = estimate_lut_accuracy(
+        loaded, model, interpolations=interpolation_mode
+    )
+    sample_accuracy = sample_lut_accuracy(
+        loaded, model, interpolation=interpolation_mode, target_sample_count=2500
     )
     return accuracy_report, sample_accuracy
 
@@ -273,11 +277,15 @@ def _(heatmap_path, interpolation_mode):
 
 
 @app.cell
-def _(analyzer, controls, interpolation_mode, output_dir):
-    heatmap_filename = f"opencv_stride_{int(controls.pixel_stride)}_{controls.storage_encoding}_{interpolation_mode}_error_heatmap.npz"
+def _(loaded, model, controls, interpolation_mode, output_dir):
+    heatmap_filename = (
+        f"opencv_stride_{int(controls.pixel_stride)}"
+        f"_{controls.storage_encoding}"
+        f"_{interpolation_mode}_error_heatmap.npz"
+    )
     heatmap_path = output_dir / heatmap_filename
 
-    heatmap = analyzer.compute_error_heatmap(interpolation=interpolation_mode)
+    heatmap = compute_lut_error_heatmap(loaded, model, interpolation=interpolation_mode)
     heatmap.save(heatmap_path)
     loaded_heatmap = UnprojectLUTErrorHeatmap.load(heatmap_path)
     fig = plot_unproject_lut_error_heatmap(
@@ -333,7 +341,9 @@ def _():
     mo.md(r"""
     ## C++ runtime
 
-    The same file can be loaded from the standalone runtime in `cpp_runtime/`. Simply copy-paste those files into your project and use them like so:
+    The same file can be loaded from the standalone runtime in
+    `cpp_runtime/`. Simply copy-paste those files into your project
+    and use them like so:
 
     ```cpp
     #include "unproject_lut.hpp"

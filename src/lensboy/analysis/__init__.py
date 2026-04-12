@@ -1,15 +1,19 @@
 from lensboy.analysis.unproject_lut import (
     UnprojectLUTAccuracyReport,
-    UnprojectLUTAnalyzer,
     UnprojectLUTErrorHeatmap,
     UnprojectLUTSampleAccuracy,
+    compute_lut_error_heatmap,
+    estimate_lut_accuracy,
+    sample_lut_accuracy,
 )
 
 __all__ = [
     "UnprojectLUTAccuracyReport",
-    "UnprojectLUTAnalyzer",
     "UnprojectLUTErrorHeatmap",
     "UnprojectLUTSampleAccuracy",
+    "compute_lut_error_heatmap",
+    "estimate_lut_accuracy",
+    "sample_lut_accuracy",
 ]
 
 try:

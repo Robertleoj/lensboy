@@ -37,9 +37,6 @@ struct UnprojectLUTMetadata {
     std::string_view storage_encoding;
     std::string_view default_interpolation;
     std::string_view default_bounds;
-    std::string_view source_model_type;
-    std::string_view source_model_spec_json;
-    std::string_view source_model_spec_json_sha256;
     std::string_view lensboy_version;
     std::size_t payload_offset_bytes = 0;
 };

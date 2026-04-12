@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import subprocess
 import textwrap
@@ -18,18 +17,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CPP_RUNTIME_DIR = REPO_ROOT / "cpp_runtime"
 
 
-def _make_linear_pinhole_model() -> lb.PinholeRemapped:
-    return lb.PinholeRemapped(
+def _make_linear_pinhole_model() -> lb.OpenCV:
+    """Zero-distortion OpenCV model that behaves like a pure pinhole."""
+    return lb.OpenCV(
         image_width=17,
         image_height=13,
         fx=23.0,
         fy=19.0,
         cx=8.0,
         cy=6.0,
-        map_x=np.zeros((13, 17), dtype=np.float32),
-        map_y=np.zeros((13, 17), dtype=np.float32),
-        input_image_width=17,
-        input_image_height=13,
+        distortion_coeffs=np.zeros(14, dtype=np.float64),
     )
 
 
@@ -39,10 +36,6 @@ def _load_opencv_model() -> lb.OpenCV:
 
 def _load_spline_model() -> lb.PinholeSplined:
     return lb.PinholeSplined.load(DATA_DIR / "spline.json")
-
-
-def _load_remapped_model() -> lb.PinholeRemapped:
-    return _load_spline_model().get_pinhole_model()
 
 
 def _header_and_payload(file_path: Path) -> tuple[str, bytes]:
@@ -121,7 +114,7 @@ def _parse_header_text(header: str) -> dict[str, str]:
 
 
 def _random_pixels(
-    model: lb.PinholeRemapped,
+    model: lb.CameraModel,
     n: int = 128,
     seed: int = 0,
 ) -> np.ndarray:
@@ -159,37 +152,18 @@ def test_unproject_lut_header_is_human_readable(tmp_path: Path) -> None:
     assert first_lines[1].startswith("payload_offset_bytes: ")
     assert first_lines[2] == "format_version: 1"
     assert first_lines[3].startswith("lensboy_version: ")
-    assert first_lines[4] == "source_model_type: pinhole_remapped"
-    assert first_lines[5].startswith("source_model_spec_json_sha256: ")
-    assert first_lines[6] == "image_size_wh: 17, 13"
-    assert first_lines[7] == "grid_size_wh: 5, 4"
-    assert first_lines[8] == "grid_extents_xy: 0, 16, 0, 12"
-    assert first_lines[9] == "grid_stride_xy: 4, 4"
-    assert first_lines[10] == "storage_encoding: float64_xy"
-    assert first_lines[11] == "default_interpolation: bilinear"
-    assert first_lines[12] == "default_bounds: strict"
-    assert first_lines[13] == "payload_layout: row_major_interleaved_xy"
-    assert first_lines[14] == "payload_endianness: little"
-    assert first_lines[15].startswith("source_model_spec_json: ")
-    assert not any(
-        line.startswith("supported_interpolations:") for line in header.splitlines()
-    )
-    assert not any(line.startswith("supported_bounds:") for line in header.splitlines())
-    assert not any(
-        line.startswith("estimated_max_angular_error_") for line in header.splitlines()
-    )
-    assert not any(
-        line.startswith("estimated_median_angular_error_") for line in header.splitlines()
-    )
-    assert not any(line.startswith("error_report_") for line in header.splitlines())
-    assert any(line.startswith("source_model_spec_json:") for line in header.splitlines())
+    assert first_lines[4] == "image_size_wh: 17, 13"
+    assert first_lines[5] == "grid_size_wh: 5, 4"
+    assert first_lines[6] == "grid_extents_xy: 0, 16, 0, 12"
+    assert first_lines[7] == "grid_stride_xy: 4, 4"
+    assert first_lines[8] == "storage_encoding: float64_xy"
+    assert first_lines[9] == "default_interpolation: bilinear"
+    assert first_lines[10] == "default_bounds: strict"
+    assert first_lines[11] == "payload_layout: row_major_interleaved_xy"
+    assert first_lines[12] == "payload_endianness: little"
+    assert not any(line.startswith("source_model_spec") for line in header.splitlines())
+    assert not any(line.startswith("source_model_type") for line in header.splitlines())
     assert int(header_fields["payload_offset_bytes"]) == len(header.encode("ascii"))
-    assert (
-        header_fields["source_model_spec_json_sha256"]
-        == hashlib.sha256(
-            header_fields["source_model_spec_json"].encode("ascii")
-        ).hexdigest()
-    )
 
 
 def test_unproject_lut_exposes_serialized_file_metadata(tmp_path: Path) -> None:
@@ -211,35 +185,26 @@ def test_unproject_lut_exposes_serialized_file_metadata(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("factory", "expected_model_type"),
-    [
-        (_load_opencv_model, "opencv"),
-        (_load_spline_model, "pinhole_splined"),
-        (_load_remapped_model, "pinhole_remapped"),
-    ],
+    "factory",
+    [_load_opencv_model, _load_spline_model],
 )
 def test_unproject_lut_round_trip_for_camera_models(
     tmp_path: Path,
     factory,
-    expected_model_type: str,
 ) -> None:
-    """OpenCV, spline, and remapped models survive LUT save/load round trips."""
+    """OpenCV and spline models survive LUT save/load round trips."""
     model = factory()
     lut = model.get_unproject_lut(
         grid_size_wh=(11, 9),
         storage_encoding="float64_xy",
     )
 
-    file_path = tmp_path / f"{expected_model_type}.unproject_LUT"
+    file_path = tmp_path / "round_trip.unproject_LUT"
     lut.save(file_path)
     loaded = lb.UnprojectLUT.load(file_path)
 
-    assert loaded.source_model_type == expected_model_type
     assert loaded.grid_size_wh == (11, 9)
     assert loaded.storage_encoding == "float64_xy"
-    assert loaded.source_model_spec is not None
-    assert loaded.source_model_spec["type"] == expected_model_type
-    assert loaded.source_model_spec_json_sha256 is not None
 
     x_coords = np.linspace(0.0, model.image_width - 1, loaded.grid_width)
     y_coords = np.linspace(0.0, model.image_height - 1, loaded.grid_height)
@@ -280,12 +245,12 @@ def test_linear_pinhole_lut_encodings(tmp_path: Path) -> None:
 
 def test_unproject_lut_analyzer_can_report_multiple_interpolations() -> None:
     """The analyzer can report multiple interpolation modes at once."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
+    from lensboy.analysis import estimate_lut_accuracy
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    report = UnprojectLUTAnalyzer(lut).estimate_accuracy(
-        interpolations=("nearest", "bilinear", "bicubic")
+    report = estimate_lut_accuracy(
+        lut, model, interpolations=("nearest", "bilinear", "bicubic")
     )
 
     assert report.interpolations == ("nearest", "bilinear", "bicubic")
@@ -303,11 +268,11 @@ def test_unproject_lut_analyzer_can_report_multiple_interpolations() -> None:
 
 def test_unproject_lut_analyzer_accepts_single_interpolation() -> None:
     """A single interpolation mode can be passed directly to the analyzer."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
+    from lensboy.analysis import estimate_lut_accuracy
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    report = UnprojectLUTAnalyzer(lut).estimate_accuracy(interpolations="bicubic")
+    report = estimate_lut_accuracy(lut, model, interpolations="bicubic")
 
     assert report.interpolations == ("bicubic",)
     assert set(report.max_angular_error_mdeg) == {"bicubic"}
@@ -318,7 +283,7 @@ def test_unproject_lut_analyzer_accepts_single_interpolation() -> None:
 
 def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path) -> None:
     """Loaded LUTs produce the same analyzer report as in-memory LUTs."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
+    from lensboy.analysis import estimate_lut_accuracy
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
@@ -326,11 +291,11 @@ def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path)
     lut.save(file_path)
     loaded = lb.UnprojectLUT.load(file_path)
 
-    report_before = UnprojectLUTAnalyzer(lut).estimate_accuracy(
-        interpolations=("nearest", "bilinear", "bicubic")
+    report_before = estimate_lut_accuracy(
+        lut, model, interpolations=("nearest", "bilinear", "bicubic")
     )
-    report_after = UnprojectLUTAnalyzer(loaded).estimate_accuracy(
-        interpolations=("nearest", "bilinear", "bicubic")
+    report_after = estimate_lut_accuracy(
+        loaded, model, interpolations=("nearest", "bilinear", "bicubic")
     )
 
     assert report_after.interpolations == report_before.interpolations
@@ -345,13 +310,12 @@ def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path)
 
 def test_unproject_lut_analyzer_can_sample_dense_accuracy_grid() -> None:
     """The analyzer can compare LUT rays against exact rays on a dense sample grid."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
+    from lensboy.analysis import sample_lut_accuracy
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    sample = UnprojectLUTAnalyzer(lut).sample_accuracy_grid(
-        interpolation="bilinear",
-        target_sample_count=2500,
+    sample = sample_lut_accuracy(
+        lut, model, interpolation="bilinear", target_sample_count=2500
     )
 
     expected_sample_count = sample.sample_grid_width * sample.sample_grid_height
@@ -375,63 +339,16 @@ def test_unproject_lut_analyzer_can_sample_dense_accuracy_grid() -> None:
 
 def test_unproject_lut_analyzer_dense_accuracy_grid_is_exact_for_linear_model() -> None:
     """A linear pinhole LUT matches the exact source model on dense sampled queries."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
+    from lensboy.analysis import sample_lut_accuracy
 
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(6, 5))
-    sample = UnprojectLUTAnalyzer(lut).sample_accuracy_grid(
-        interpolation="bilinear",
-        target_sample_count=2500,
+    sample = sample_lut_accuracy(
+        lut, model, interpolation="bilinear", target_sample_count=2500
     )
 
     np.testing.assert_allclose(sample.approx_rays, sample.exact_rays, atol=1e-12)
     assert sample.max_angular_error_mdeg < 1e-2
-
-
-def test_unproject_lut_parallel_grid_build_matches_serial() -> None:
-    """Parallel LUT grid sampling matches the serial build exactly."""
-    model = _make_linear_pinhole_model()
-    serial_lut = model.get_unproject_lut(
-        grid_size_wh=(17, 13),
-        num_workers=1,
-    )
-    parallel_lut = model.get_unproject_lut(
-        grid_size_wh=(17, 13),
-        num_workers=2,
-    )
-
-    np.testing.assert_allclose(parallel_lut.xy_grid, serial_lut.xy_grid, atol=0.0)
-    assert parallel_lut.grid_size_wh == serial_lut.grid_size_wh
-    assert parallel_lut.grid_extents_xy == serial_lut.grid_extents_xy
-
-
-def test_unproject_lut_analyzer_is_stable_across_num_workers() -> None:
-    """Changing LUT build workers does not affect analyzer results."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
-
-    model = _load_opencv_model()
-    serial_lut = model.get_unproject_lut(
-        grid_size_wh=(7, 6),
-        num_workers=1,
-    )
-    parallel_lut = model.get_unproject_lut(
-        grid_size_wh=(7, 6),
-        num_workers=2,
-    )
-    serial_report = UnprojectLUTAnalyzer(serial_lut).estimate_accuracy(
-        interpolations=("nearest", "bilinear", "bicubic")
-    )
-    parallel_report = UnprojectLUTAnalyzer(parallel_lut).estimate_accuracy(
-        interpolations=("nearest", "bilinear", "bicubic")
-    )
-
-    for mode in ("nearest", "bilinear", "bicubic"):
-        assert parallel_report.max_angular_error_mdeg[mode] == pytest.approx(
-            serial_report.max_angular_error_mdeg[mode]
-        )
-        assert parallel_report.median_angular_error_mdeg[mode] == pytest.approx(
-            serial_report.median_angular_error_mdeg[mode]
-        )
 
 
 def test_unproject_lut_grid_stride_can_be_fractional() -> None:
@@ -526,11 +443,11 @@ def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> 
 
 def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
     """A nonlinear model produces finite observed angular error summaries."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
+    from lensboy.analysis import estimate_lut_accuracy
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    report = UnprojectLUTAnalyzer(lut).estimate_accuracy()
+    report = estimate_lut_accuracy(lut, model)
 
     assert report.interpolations == ("bilinear",)
     assert np.isfinite(report.max_angular_error_mdeg["bilinear"])
@@ -549,31 +466,6 @@ def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
     assert isinstance(approx, np.ndarray)
     dense_error = _query_error_deg(exact, approx)
     assert dense_error <= (report.max_angular_error_mdeg["bilinear"] / 1.0e3) + 1.0
-
-
-def test_unproject_lut_analyzer_requires_source_model_spec() -> None:
-    """Analyzer methods fail clearly when the LUT lacks an exact source model spec."""
-    from lensboy.analysis import UnprojectLUTAnalyzer
-
-    lut = lb.UnprojectLUT(
-        image_width=5,
-        image_height=4,
-        grid_width=5,
-        grid_height=4,
-        grid_x_min=0.0,
-        grid_x_max=4.0,
-        grid_y_min=0.0,
-        grid_y_max=3.0,
-        storage_encoding="float64_xy",
-        xy_grid=np.zeros((4, 5, 2), dtype=np.float64),
-        source_model_type=None,
-        source_model_spec=None,
-    )
-
-    with pytest.raises(ValueError, match="source_model_spec_json"):
-        UnprojectLUTAnalyzer(lut).estimate_accuracy()
-    with pytest.raises(ValueError, match="source_model_spec_json"):
-        UnprojectLUTAnalyzer(lut).sample_accuracy_grid()
 
 
 def test_unproject_lut_rejects_wrong_suffix(tmp_path: Path) -> None:
@@ -618,19 +510,6 @@ def test_unproject_lut_rejects_bad_payload_offset(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="payload_offset_bytes"):
-        lb.UnprojectLUT.load(file_path)
-
-
-def test_unproject_lut_rejects_bad_source_model_spec_hash(tmp_path: Path) -> None:
-    """Loading validates the source-model spec hash."""
-    model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(grid_size_wh=(4, 4))
-    file_path = tmp_path / "bad_hash.unproject_LUT"
-    lut.save(file_path)
-
-    _rewrite_header_field(file_path, "source_model_spec_json_sha256", "deadbeef")
-
-    with pytest.raises(ValueError, match="source_model_spec_json_sha256"):
         lb.UnprojectLUT.load(file_path)
 
 
@@ -700,14 +579,13 @@ def test_unproject_lut_rejects_nonfinite_payload_values(
 
 def test_unproject_lut_analyzer_can_save_and_load_error_heatmaps(tmp_path: Path) -> None:
     """Analyzer heatmaps can be saved and loaded without the LUT header."""
-    from lensboy.analysis import UnprojectLUTAnalyzer, UnprojectLUTErrorHeatmap
+    from lensboy.analysis import UnprojectLUTErrorHeatmap, compute_lut_error_heatmap
 
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(6, 5))
     heatmap_path = tmp_path / "bilinear_error_heatmaps.npz"
-    analyzer = UnprojectLUTAnalyzer(lut)
 
-    heatmap = analyzer.compute_error_heatmap(interpolation="bilinear")
+    heatmap = compute_lut_error_heatmap(lut, model, interpolation="bilinear")
     heatmap.save(heatmap_path)
     loaded = UnprojectLUTErrorHeatmap.load(heatmap_path)
 
@@ -723,14 +601,17 @@ def test_plot_unproject_lut_error_heatmap_supports_angular_units(tmp_path: Path)
     """The heatmap plot helper rescales angular error into the requested units."""
     import matplotlib
 
-    from lensboy.analysis import UnprojectLUTAnalyzer, plot_unproject_lut_error_heatmap
+    from lensboy.analysis import (
+        compute_lut_error_heatmap,
+        plot_unproject_lut_error_heatmap,
+    )
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(6, 5))
-    heatmap = UnprojectLUTAnalyzer(lut).compute_error_heatmap(interpolation="bilinear")
+    heatmap = compute_lut_error_heatmap(lut, model, interpolation="bilinear")
     expected_mdeg = heatmap.max_angular_error_deg * 1.0e3
 
     fig = plot_unproject_lut_error_heatmap(
@@ -755,16 +636,19 @@ def test_plot_unproject_lut_error_heatmap_accepts_figsize(tmp_path: Path) -> Non
     """The heatmap plot helper forwards the requested figure size."""
     import matplotlib
 
-    from lensboy.analysis import UnprojectLUTAnalyzer, plot_unproject_lut_error_heatmap
+    from lensboy.analysis import (
+        compute_lut_error_heatmap,
+        plot_unproject_lut_error_heatmap,
+    )
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(6, 5))
-    analyzer = UnprojectLUTAnalyzer(lut)
     heatmap_path = tmp_path / "bilinear_error_heatmaps_figsize.npz"
-    analyzer.save_error_heatmap(heatmap_path, interpolation="bilinear")
+    heatmap = compute_lut_error_heatmap(lut, model, interpolation="bilinear")
+    heatmap.save(heatmap_path)
 
     fig = plot_unproject_lut_error_heatmap(
         heatmap_path,

@@ -462,12 +462,6 @@ UnprojectLUT UnprojectLUT::load(
 
     std::string const default_interpolation = require_field("default_interpolation");
     std::string const default_bounds = require_field("default_bounds");
-    std::string const source_model_type =
-        parse_optional_string(require_field("source_model_type"));
-    std::string const source_model_spec_json =
-        parse_optional_string(require_field("source_model_spec_json"));
-    std::string const source_model_spec_json_sha256 =
-        parse_optional_string(require_field("source_model_spec_json_sha256"));
     std::string const lensboy_version = require_field("lensboy_version");
 
     std::vector<char> string_storage;
@@ -475,9 +469,6 @@ UnprojectLUT UnprojectLUT::load(
         storage_encoding.size() +
         default_interpolation.size() +
         default_bounds.size() +
-        source_model_type.size() +
-        source_model_spec_json.size() +
-        source_model_spec_json_sha256.size() +
         lensboy_version.size() +
         8
     );
@@ -501,18 +492,6 @@ UnprojectLUT UnprojectLUT::load(
     metadata.default_bounds = append_string_view(
         string_storage,
         default_bounds
-    );
-    metadata.source_model_type = append_string_view(
-        string_storage,
-        source_model_type
-    );
-    metadata.source_model_spec_json = append_string_view(
-        string_storage,
-        source_model_spec_json
-    );
-    metadata.source_model_spec_json_sha256 = append_string_view(
-        string_storage,
-        source_model_spec_json_sha256
     );
     metadata.lensboy_version = append_string_view(
         string_storage,

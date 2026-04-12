@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import math
-import os
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from importlib.metadata import version as _package_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
@@ -38,7 +34,6 @@ _SUPPORTED_ENCODINGS: dict[StorageEncoding, np.dtype] = {
     "float16_xy": np.dtype("<f2"),
 }
 _MAX_HEADER_BYTES = 512 * 1024 * 1024
-_LUT_BUILD_TARGET_CHUNK_SAMPLES = 8_388_608
 
 
 def _validate_interpolation_mode(interpolation: str) -> InterpolationMode:
@@ -67,50 +62,6 @@ def _validate_storage_encoding(storage_encoding: str) -> StorageEncoding:
     return storage_encoding  # type: ignore[return-value]
 
 
-def _snake_case_name(name: str) -> str:
-    out: list[str] = []
-    for i, ch in enumerate(name):
-        if ch.isupper() and i > 0 and not name[i - 1].isupper():
-            out.append("_")
-        out.append(ch.lower())
-    return "".join(out)
-
-
-def _camera_model_type_name(camera_model: CameraModel) -> str:
-    camera_model_name = getattr(camera_model, "_camera_model_name", None)
-    if callable(camera_model_name):
-        return str(camera_model_name())
-
-    name = _snake_case_name(type(camera_model).__name__)
-    if name == "open_cv":
-        return "opencv"
-    return name
-
-
-def _camera_model_spec(camera_model: CameraModel) -> dict[str, Any] | None:
-    to_json = getattr(camera_model, "to_json", None)
-    if not callable(to_json):
-        return None
-
-    serialized = to_json()
-    if isinstance(serialized, tuple):
-        serialized = serialized[0]
-    if not isinstance(serialized, dict):
-        return None
-    return serialized
-
-
-def _serialize_source_model_spec(source_model_spec: dict[str, Any] | None) -> str | None:
-    if source_model_spec is None:
-        return None
-    return json.dumps(
-        source_model_spec,
-        separators=(",", ":"),
-        sort_keys=True,
-        ensure_ascii=True,
-    )
-
-
 def _parse_pair_of_ints(text: str, field_name: str) -> tuple[int, int]:
     parts = [part.strip() for part in text.split(",")]
     if len(parts) != 2:
@@ -134,34 +85,14 @@ def _parse_pair_of_floats(text: str, field_name: str) -> tuple[float, float]:
     return float(parts[0]), float(parts[1])
 
 
-def _parse_optional_str(text: str) -> str | None:
-    if text == "not_computed":
-        return None
-    return text
-
-
 def _format_float(value: float) -> str:
     if math.isnan(value):
         return "not_computed"
     return f"{value:.17g}"
 
 
-def _format_optional_str(value: str | None) -> str:
-    return "not_computed" if value is None else value
-
-
 def _format_csv(values: list[str]) -> str:
     return ", ".join(values)
-
-
-def _normalize_num_workers(num_workers: int | None) -> int:
-    if num_workers is None:
-        resolved = os.cpu_count() or 1
-    else:
-        resolved = int(num_workers)
-        if resolved <= 0:
-            raise ValueError("num_workers must be positive when provided.")
-    return resolved
 
 
 def _catmull_rom_weights(t: np.ndarray) -> np.ndarray:
@@ -333,8 +264,7 @@ def _sample_xy_grid_seeded(
         )
     else:
         raise TypeError(
-            f"Seeded normalization not supported for {type(camera_model).__name__}. "
-            "Use the standard sampling path instead."
+            "UnprojectLUT is only supported for OpenCV and PinholeSplined models."
         )
 
     xy = np.asarray(rays[:, :2], dtype=np.float64)
@@ -385,8 +315,6 @@ class UnprojectLUT:
         xy_grid: Cached x/y ray components with shape ``(grid_height, grid_width, 2)``.
         default_interpolation: Default interpolation mode for runtime queries.
         default_bounds: Default bounds behavior for runtime queries.
-        source_model_type: Name of the camera model used to build the LUT.
-        source_model_spec: Exact serialized source-model specification, if available.
         lensboy_version: Package version that produced the LUT.
 
     Returns:
@@ -405,8 +333,6 @@ class UnprojectLUT:
     xy_grid: np.ndarray
     default_interpolation: InterpolationMode = "bilinear"
     default_bounds: BoundsMode = "strict"
-    source_model_type: str | None = None
-    source_model_spec: dict[str, Any] | None = None
     lensboy_version: str = field(default_factory=lambda: _package_version("lensboy"))
     _grid_scale_x: float = field(init=False, repr=False)
     _grid_scale_y: float = field(init=False, repr=False)
@@ -417,10 +343,6 @@ class UnprojectLUT:
             self.default_interpolation
         )
         self.default_bounds = _validate_bounds_mode(self.default_bounds)
-        if self.source_model_spec is not None and not isinstance(
-            self.source_model_spec, dict
-        ):
-            raise ValueError("source_model_spec must be a dict when provided.")
         if self.image_width <= 0 or self.image_height <= 0:
             raise ValueError("image dimensions must be positive.")
         if self.grid_width <= 0 or self.grid_height <= 0:
@@ -557,27 +479,11 @@ class UnprojectLUT:
         """
         return _SUPPORTED_BOUNDS
 
-    @property
-    def source_model_spec_json_sha256(self) -> str | None:
-        """Return a stable hash of the serialized source-model specification.
-
-        Returns:
-            Lowercase SHA-256 hex digest of the canonical source-model JSON, or None
-            if the LUT does not carry a source-model specification.
-        """
-        source_model_spec_json = self._source_model_spec_json()
-        if source_model_spec_json is None:
-            return None
-        return hashlib.sha256(source_model_spec_json.encode("ascii")).hexdigest()
-
     @staticmethod
     def _compute_grid_scale(size: int, minimum: float, maximum: float) -> float:
         if size == 1 or maximum == minimum:
             return 0.0
         return (size - 1) / (maximum - minimum)
-
-    def _source_model_spec_json(self) -> str | None:
-        return _serialize_source_model_spec(self.source_model_spec)
 
     @staticmethod
     def from_camera_model(
@@ -586,7 +492,6 @@ class UnprojectLUT:
         grid_size_wh: tuple[int, int] | None = None,
         pixel_stride: float | tuple[float, float] | None = None,
         storage_encoding: StorageEncoding = "float64_xy",
-        num_workers: int | None = None,
     ) -> UnprojectLUT:
         """Build a LUT from a camera model.
 
@@ -597,13 +502,11 @@ class UnprojectLUT:
             pixel_stride: Approximate pixel spacing between cached samples. Mutually
                 exclusive with ``grid_size_wh``.
             storage_encoding: On-disk payload encoding to use when saving.
-            num_workers: Number of worker threads to use while sampling the LUT grid.
 
         Returns:
             A populated unprojection LUT.
         """
         storage_encoding = _validate_storage_encoding(storage_encoding)
-        resolved_num_workers = _normalize_num_workers(num_workers)
         if grid_size_wh is not None and pixel_stride is not None:
             raise ValueError("grid_size_wh and pixel_stride are mutually exclusive.")
 
@@ -647,98 +550,8 @@ class UnprojectLUT:
             grid_y_max=float(camera_model.image_height - 1),
             storage_encoding=storage_encoding,
             xy_grid=xy_grid,
-            source_model_type=_camera_model_type_name(camera_model),
-            source_model_spec=_camera_model_spec(camera_model),
         )
         return lut
-
-    @staticmethod
-    def _sample_xy_grid(
-        camera_model: CameraModel,
-        *,
-        x_coords: np.ndarray,
-        y_coords: np.ndarray,
-        payload_dtype: np.dtype,
-        num_workers: int,
-    ) -> np.ndarray:
-        grid_width = len(x_coords)
-        grid_height = len(y_coords)
-        xy_grid = np.empty((grid_height, grid_width, 2), dtype=np.float64)
-        target_chunk_rows = max(
-            1,
-            min(
-                grid_height,
-                _LUT_BUILD_TARGET_CHUNK_SAMPLES // max(grid_width, 1),
-            ),
-        )
-        if num_workers > 1:
-            target_parallel_chunks = min(num_workers, grid_height)
-            target_chunk_rows = min(
-                target_chunk_rows,
-                max(1, int(math.ceil(grid_height / target_parallel_chunks))),
-            )
-
-        row_ranges = [
-            (row_start, min(row_start + target_chunk_rows, grid_height))
-            for row_start in range(0, grid_height, target_chunk_rows)
-        ]
-
-        if len(row_ranges) == 1 or num_workers == 1:
-            for row_start, row_stop in row_ranges:
-                _, _, xy_chunk = UnprojectLUT._sample_xy_grid_chunk(
-                    camera_model,
-                    x_coords=x_coords,
-                    y_coords=y_coords,
-                    payload_dtype=payload_dtype,
-                    row_start=row_start,
-                    row_stop=row_stop,
-                )
-                xy_grid[row_start:row_stop] = xy_chunk
-            return xy_grid
-
-        worker_count = min(num_workers, len(row_ranges))
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(
-                    UnprojectLUT._sample_xy_grid_chunk,
-                    camera_model,
-                    x_coords=x_coords,
-                    y_coords=y_coords,
-                    payload_dtype=payload_dtype,
-                    row_start=row_start,
-                    row_stop=row_stop,
-                )
-                for row_start, row_stop in row_ranges
-            ]
-            for future in futures:
-                row_start, row_stop, xy_chunk = future.result()
-                xy_grid[row_start:row_stop] = xy_chunk
-
-        return xy_grid
-
-    @staticmethod
-    def _sample_xy_grid_chunk(
-        camera_model: CameraModel,
-        *,
-        x_coords: np.ndarray,
-        y_coords: np.ndarray,
-        payload_dtype: np.dtype,
-        row_start: int,
-        row_stop: int,
-    ) -> tuple[int, int, np.ndarray]:
-        y_chunk = y_coords[row_start:row_stop]
-        grid_width = len(x_coords)
-        pixel_count = grid_width * len(y_chunk)
-        pixels = np.empty((pixel_count, 2), dtype=np.float64)
-        pixels[:, 0] = np.tile(x_coords, len(y_chunk))
-        pixels[:, 1] = np.repeat(y_chunk, grid_width)
-
-        rays = camera_model.normalize_points(pixels)
-        xy_chunk = np.asarray(rays[:, :2], dtype=np.float64)
-        if payload_dtype != np.dtype(np.float64):
-            xy_chunk = np.asarray(xy_chunk, dtype=payload_dtype).astype(np.float64)
-
-        return row_start, row_stop, xy_chunk.reshape(len(y_chunk), grid_width, 2)
 
     def save(self, path: Path | str) -> None:
         """Write the LUT to a `.unproject_LUT` file.
@@ -842,25 +655,6 @@ class UnprojectLUT:
                 "grid_stride_xy does not match grid_extents_xy and grid_size_wh."
             )
 
-        source_model_spec_json = header["source_model_spec_json"]
-        source_model_spec_json_sha256 = header["source_model_spec_json_sha256"]
-        if source_model_spec_json == "not_computed":
-            if source_model_spec_json_sha256 != "not_computed":
-                raise ValueError(
-                    "source_model_spec_json_sha256 must be not_computed when "
-                    "source_model_spec_json is not_computed."
-                )
-            source_model_spec = None
-        else:
-            expected_hash = hashlib.sha256(
-                source_model_spec_json.encode("ascii")
-            ).hexdigest()
-            if source_model_spec_json_sha256 != expected_hash:
-                raise ValueError(
-                    "source_model_spec_json_sha256 does not match source_model_spec_json."
-                )
-            source_model_spec = json.loads(source_model_spec_json)
-
         xy_grid = (
             np.frombuffer(payload, dtype=dtype)
             .astype(np.float64)
@@ -882,8 +676,6 @@ class UnprojectLUT:
                 header["default_interpolation"]
             ),
             default_bounds=_validate_bounds_mode(header["default_bounds"]),
-            source_model_type=_parse_optional_str(header["source_model_type"]),
-            source_model_spec=source_model_spec,
             lensboy_version=header["lensboy_version"],
         )
 
@@ -928,9 +720,6 @@ class UnprojectLUT:
             "format",
             "format_version",
             "lensboy_version",
-            "source_model_type",
-            "source_model_spec_json",
-            "source_model_spec_json_sha256",
             "image_size_wh",
             "grid_size_wh",
             "grid_extents_xy",
@@ -971,15 +760,6 @@ class UnprojectLUT:
             )
 
     def _encode_header(self) -> str:
-        source_model_spec_json = self._source_model_spec_json()
-        if source_model_spec_json is None:
-            source_model_spec_json = "not_computed"
-            source_model_spec_json_sha256 = "not_computed"
-        else:
-            source_model_spec_json_sha256 = hashlib.sha256(
-                source_model_spec_json.encode("ascii")
-            ).hexdigest()
-
         stride_x, stride_y = self.grid_stride_xy
 
         def build_lines(payload_offset_bytes_text: str) -> list[str]:
@@ -988,8 +768,6 @@ class UnprojectLUT:
                 f"payload_offset_bytes: {payload_offset_bytes_text}",
                 f"format_version: {_FORMAT_VERSION}",
                 f"lensboy_version: {self.lensboy_version}",
-                f"source_model_type: {_format_optional_str(self.source_model_type)}",
-                f"source_model_spec_json_sha256: {source_model_spec_json_sha256}",
                 "image_size_wh: "
                 + _format_csv([str(self.image_width), str(self.image_height)]),
                 "grid_size_wh: "
@@ -1010,7 +788,6 @@ class UnprojectLUT:
                 f"default_bounds: {self.default_bounds}",
                 f"payload_layout: {_PAYLOAD_LAYOUT}",
                 f"payload_endianness: {_PAYLOAD_ENDIANNESS}",
-                f"source_model_spec_json: {source_model_spec_json}",
                 _HEADER_END_MARKER,
             ]
 

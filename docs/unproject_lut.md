@@ -5,7 +5,7 @@
 The `.unproject_LUT` file format is intentionally split into two concerns:
 
 - `UnprojectLUT` is the runtime object. It handles grid construction, file I/O, and fast lookup.
-- `UnprojectLUTAnalyzer` is the analysis object. It reconstructs the exact source model from the embedded model spec and computes accuracy summaries or error heatmaps on demand.
+- The analysis functions (`estimate_lut_accuracy`, `compute_lut_error_heatmap`) take the LUT and the original camera model to compute accuracy summaries or error heatmaps.
 
 This keeps the runtime file format compact while still making later analysis possible.
 
@@ -61,14 +61,13 @@ Supported bounds modes:
 ## Analyze accuracy later
 
 ```python
-from lensboy.analysis import UnprojectLUTAnalyzer
+from lensboy.analysis import estimate_lut_accuracy, compute_lut_error_heatmap
 
-analyzer = UnprojectLUTAnalyzer(runtime_lut)
-
-report = analyzer.estimate_accuracy(
+report = estimate_lut_accuracy(
+    runtime_lut, model,
     interpolations=("nearest", "bilinear"),
 )
-heatmap = analyzer.compute_error_heatmap(interpolation="bilinear")
+heatmap = compute_lut_error_heatmap(runtime_lut, model, interpolation="bilinear")
 heatmap.save("camera_bilinear_error_heatmap.npz")
 ```
 
@@ -78,8 +77,6 @@ The accuracy report contains:
 - `median_angular_error_mdeg`
 - the interpolation modes that were analyzed
 - the adaptive estimator settings that produced the result
-
-The analyzer requires `source_model_spec_json` to be present in the LUT. Standard `lensboy` camera models write that field automatically.
 
 ## Plot a heatmap
 
@@ -106,11 +103,9 @@ The header looks like this:
 
 ```text
 format: lensboy_unproject_LUT
-payload_offset_bytes: 1306
+payload_offset_bytes: 382
 format_version: 1
 lensboy_version: 3.0.1
-source_model_type: opencv
-source_model_spec_json_sha256: e31fc9944f7ad2a787a38a65331bf873baeeed68fc881f6e237e3b6a5a3e9811
 image_size_wh: 3088, 2064
 grid_size_wh: 98, 66
 grid_extents_xy: 0, 3087, 0, 2063
@@ -120,16 +115,14 @@ default_interpolation: bilinear
 default_bounds: strict
 payload_layout: row_major_interleaved_xy
 payload_endianness: little
-source_model_spec_json: {"cx":1514.1042261000703,"cy":1076.8896307961334,"distortion_coeffs":[...],"fx":1354.51232559645,"fy":1354.318019481934,"image_height":2064,"image_width":3088,"lensboy-version":"3.0.1","type":"opencv"}
 END_HEADER
 ```
 
 Notes:
 
 - `grid_stride_xy` is derived from the extents and grid size, so it may be fractional.
-- `source_model_spec_json` is stored in canonical JSON form.
 - The binary payload is little-endian, row-major, interleaved `x/y`.
-- The runtime format does not store accuracy reports. Those are computed separately by `UnprojectLUTAnalyzer`.
+- The LUT is a pure runtime artifact -- it does not store the source camera model.
 
 ## Standalone C++ runtime
 

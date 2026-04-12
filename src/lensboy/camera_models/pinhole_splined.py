@@ -4,11 +4,15 @@ import json
 from dataclasses import dataclass
 from importlib.metadata import version as _package_version
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from lensboy import lensboy_bindings as lbb
 from lensboy.camera_models.base_model import CameraModel, CameraModelConfig
+
+if TYPE_CHECKING:
+    from lensboy.camera_models.unproject_lut import StorageEncoding, UnprojectLUT
 from lensboy.camera_models.pinhole_remapped import PinholeRemapped
 
 
@@ -220,6 +224,33 @@ class PinholeSplined(CameraModel):
             self._cpp_config(),
             self._cpp_params(),
             pixel_coords=pts,
+        )
+
+    def get_unproject_lut(
+        self,
+        *,
+        grid_size_wh: tuple[int, int] | None = None,
+        pixel_stride: float | tuple[float, float] | None = None,
+        storage_encoding: StorageEncoding = "float64_xy",
+    ) -> UnprojectLUT:
+        """Build a lookup table that caches ``normalize_points()`` on a grid.
+
+        Args:
+            grid_size_wh: Number of cached samples as ``(width, height)``.
+            pixel_stride: Approximate sample spacing in pixels. Mutually
+                exclusive with ``grid_size_wh``.
+            storage_encoding: On-disk payload encoding.
+
+        Returns:
+            A populated unprojection lookup table.
+        """
+        from lensboy.camera_models.unproject_lut import UnprojectLUT
+
+        return UnprojectLUT.from_camera_model(
+            self,
+            grid_size_wh=grid_size_wh,
+            pixel_stride=pixel_stride,
+            storage_encoding=storage_encoding,
         )
 
     def project_points(

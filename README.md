@@ -97,7 +97,7 @@ payload:
 
 ```python
 import lensboy as lb
-from lensboy.analysis import UnprojectLUTAnalyzer
+from lensboy.analysis import estimate_lut_accuracy, compute_lut_error_heatmap
 
 model = lb.OpenCV.load("camera.json")
 lut = model.get_unproject_lut(
@@ -113,9 +113,8 @@ rays = runtime_lut.normalize_points(
     bounds="strict",
 )
 
-analyzer = UnprojectLUTAnalyzer(runtime_lut)
-report = analyzer.estimate_accuracy(interpolations="bilinear")
-heatmap = analyzer.compute_error_heatmap(interpolation="bilinear")
+report = estimate_lut_accuracy(runtime_lut, model, interpolations="bilinear")
+heatmap = compute_lut_error_heatmap(runtime_lut, model, interpolation="bilinear")
 ```
 
 See the [unproject LUT guide](https://robertleoj.github.io/lensboy/unproject_lut.html)
