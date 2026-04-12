@@ -14,6 +14,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from lensboy.camera_models.base_model import CameraModel
+    from lensboy.camera_models.opencv import OpenCV
+    from lensboy.camera_models.pinhole_splined import PinholeSplined
 
 InterpolationMode = Literal["nearest", "bilinear", "bicubic"]
 BoundsMode = Literal["strict", "clamp", "extrapolate"]
@@ -174,6 +176,192 @@ def _catmull_rom_weights(t: np.ndarray) -> np.ndarray:
         ],
         axis=1,
     )
+
+
+def _stereographic_to_normalized(sx: np.ndarray, sy: np.ndarray) -> np.ndarray:
+    """Convert stereographic coordinates to normalized pinhole coordinates.
+
+    Inverts the normalized_to_stereographic mapping.
+
+    Args:
+        sx: Stereographic x coordinates, shape ``(N,)``.
+        sy: Stereographic y coordinates, shape ``(N,)``.
+
+    Returns:
+        Normalized coordinates, shape ``(N, 2)``.
+    """
+    r_s = np.sqrt(sx * sx + sy * sy + 1e-30)
+    theta = 2.0 * np.arctan(r_s / 2.0)
+    r_n = np.tan(theta)
+    scale = r_n / r_s
+    return np.column_stack([sx * scale, sy * scale])
+
+
+def _compute_seed_grid(
+    camera_model: OpenCV | PinholeSplined,
+) -> tuple[np.ndarray, np.ndarray, int, int]:
+    """Build a seed correspondence grid for seeded normalization.
+
+    Creates a regular grid in stereographic space, converts to normalized
+    coordinates, and forward-projects through the camera model to get pixel
+    locations. Returns (pixel, normalized) correspondences suitable for
+    building an initial-guess spatial index.
+
+    Args:
+        camera_model: Camera model with ``project_points`` and FOV properties.
+
+    Returns:
+        Tuple of (seed_pixels, seed_normals, seed_w, seed_h) where pixels and
+        normals have shape ``(seed_w * seed_h, 2)``.
+    """
+    fov_x_rad = camera_model.fov_deg_x * math.pi / 180.0
+    fov_y_rad = camera_model.fov_deg_y * math.pi / 180.0
+    half_x = 2.0 * math.tan(fov_x_rad / 4.0)
+    half_y = 2.0 * math.tan(fov_y_rad / 4.0)
+
+    # No overscan -- the FOV-based range covers the image exactly.
+    # Overscanning risks entering fold-over regions where the distortion
+    # model maps multiple rays to the same pixel.
+
+    # Seed grid: ~1 seed per 4 image pixels along the long axis
+    w = camera_model.image_width
+    h = camera_model.image_height
+    aspect = half_x / half_y if half_y > 0 else 1.0
+    seed_long = max(w, h) // 4
+    if aspect >= 1.0:
+        seed_w = seed_long
+        seed_h = max(4, int(round(seed_long / aspect)))
+    else:
+        seed_h = seed_long
+        seed_w = max(4, int(round(seed_long * aspect)))
+
+    sx = np.linspace(-half_x, half_x, seed_w, dtype=np.float64)
+    sy = np.linspace(-half_y, half_y, seed_h, dtype=np.float64)
+    gsx, gsy = np.meshgrid(sx, sy, indexing="xy")
+    flat_sx = gsx.ravel()
+    flat_sy = gsy.ravel()
+
+    normals_xy = _stereographic_to_normalized(flat_sx, flat_sy)
+    rays_3d = np.column_stack([normals_xy, np.ones(len(normals_xy), dtype=np.float64)])
+    seed_pixels = camera_model.project_points(rays_3d)
+
+    # Discard seed points that project outside the image.  Points beyond
+    # the valid FOV can fold back into the image under heavy distortion,
+    # but the stereographic margin is tight enough that these are rare
+    # and the Newton solver handles them via the pinhole fallback guess.
+    w = camera_model.image_width
+    h = camera_model.image_height
+    outside = (
+        (seed_pixels[:, 0] < -0.5)
+        | (seed_pixels[:, 0] > w - 0.5)
+        | (seed_pixels[:, 1] < -0.5)
+        | (seed_pixels[:, 1] > h - 0.5)
+        | ~np.isfinite(seed_pixels[:, 0])
+    )
+    seed_pixels[outside] = np.nan
+    normals_xy[outside] = np.nan
+
+    seed_normals = np.ascontiguousarray(normals_xy, dtype=np.float64)
+    seed_pixels = np.ascontiguousarray(seed_pixels, dtype=np.float64)
+
+    return seed_pixels, seed_normals, seed_w, seed_h
+
+
+def _sample_xy_grid_seeded(
+    camera_model: CameraModel,
+    *,
+    x_coords: np.ndarray,
+    y_coords: np.ndarray,
+    payload_dtype: np.dtype,
+) -> np.ndarray:
+    """Sample the unproject grid using seeded C++ normalization.
+
+    Builds a seed correspondence grid from a stereographic-space sampling,
+    then dispatches to C++ for spatial-index lookup, bilinear initial guess,
+    and Newton refinement.
+
+    Args:
+        camera_model: Camera model to sample.
+        x_coords: Grid x pixel coordinates, shape ``(grid_width,)``.
+        y_coords: Grid y pixel coordinates, shape ``(grid_height,)``.
+        payload_dtype: Storage dtype for quantization simulation.
+
+    Returns:
+        Sampled xy grid, shape ``(grid_height, grid_width, 2)``.
+    """
+    from lensboy import lensboy_bindings as lbb
+
+    grid_width = len(x_coords)
+    grid_height = len(y_coords)
+
+    # Build query pixel grid
+    gx, gy = np.meshgrid(x_coords, y_coords, indexing="xy")
+    query_pixels = np.ascontiguousarray(
+        np.column_stack([gx.ravel(), gy.ravel()]), dtype=np.float64
+    )
+
+    seed_pixels, seed_normals, seed_w, seed_h = _compute_seed_grid(camera_model)  # type: ignore[arg-type]
+
+    from lensboy.camera_models.opencv import OpenCV
+    from lensboy.camera_models.pinhole_splined import PinholeSplined
+
+    if isinstance(camera_model, OpenCV):
+        dist = np.asarray(camera_model.distortion_coeffs, dtype=np.float64)
+        if len(dist) < 14:
+            dist = np.pad(dist, (0, 14 - len(dist)))
+        intrinsics = np.concatenate(
+            [
+                np.array(
+                    [camera_model.fx, camera_model.fy, camera_model.cx, camera_model.cy],
+                    dtype=np.float64,
+                ),
+                dist[:14],
+            ]
+        )
+        rays = lbb.seeded_normalize_opencv(
+            seed_pixels, seed_normals, seed_w, seed_h, query_pixels, intrinsics
+        )
+    elif isinstance(camera_model, PinholeSplined):
+        rays = lbb.seeded_normalize_splined(
+            seed_pixels,
+            seed_normals,
+            seed_w,
+            seed_h,
+            query_pixels,
+            camera_model._cpp_config(),
+            camera_model._cpp_params(),
+        )
+    else:
+        raise TypeError(
+            f"Seeded normalization not supported for {type(camera_model).__name__}. "
+            "Use the standard sampling path instead."
+        )
+
+    xy = np.asarray(rays[:, :2], dtype=np.float64)
+    if payload_dtype != np.dtype(np.float64):
+        xy = np.asarray(xy, dtype=payload_dtype).astype(np.float64)
+
+    return xy.reshape(grid_height, grid_width, 2)
+
+
+def _normalize_pixel_stride(
+    pixel_stride: float | tuple[float, float],
+) -> tuple[float, float]:
+    if isinstance(pixel_stride, tuple):
+        stride_x = float(pixel_stride[0])
+        stride_y = float(pixel_stride[1])
+    else:
+        stride_x = float(pixel_stride)
+        stride_y = float(pixel_stride)
+    if stride_x <= 0.0 or stride_y <= 0.0:
+        raise ValueError("pixel_stride values must be positive.")
+    return stride_x, stride_y
+
+
+def _grid_size_from_stride(image_size: int, stride: float) -> int:
+    if image_size <= 1:
+        return 1
+    return int(math.ceil((image_size - 1) / stride)) + 1
 
 
 @dataclass
@@ -391,9 +579,8 @@ class UnprojectLUT:
     def _source_model_spec_json(self) -> str | None:
         return _serialize_source_model_spec(self.source_model_spec)
 
-    @classmethod
+    @staticmethod
     def from_camera_model(
-        cls,
         camera_model: CameraModel,
         *,
         grid_size_wh: tuple[int, int] | None = None,
@@ -425,13 +612,9 @@ class UnprojectLUT:
                 grid_width = camera_model.image_width
                 grid_height = camera_model.image_height
             else:
-                stride_x, stride_y = cls._normalize_pixel_stride(pixel_stride)
-                grid_width = cls._grid_size_from_stride(
-                    camera_model.image_width, stride_x
-                )
-                grid_height = cls._grid_size_from_stride(
-                    camera_model.image_height, stride_y
-                )
+                stride_x, stride_y = _normalize_pixel_stride(pixel_stride)
+                grid_width = _grid_size_from_stride(camera_model.image_width, stride_x)
+                grid_height = _grid_size_from_stride(camera_model.image_height, stride_y)
         else:
             grid_width, grid_height = int(grid_size_wh[0]), int(grid_size_wh[1])
 
@@ -445,15 +628,15 @@ class UnprojectLUT:
             0.0, float(camera_model.image_height - 1), grid_height, dtype=np.float64
         )
         payload_dtype = _SUPPORTED_ENCODINGS[storage_encoding]
-        xy_grid = cls._sample_xy_grid(
+
+        xy_grid = _sample_xy_grid_seeded(
             camera_model,
             x_coords=x_coords,
             y_coords=y_coords,
             payload_dtype=payload_dtype,
-            num_workers=resolved_num_workers,
         )
 
-        lut = cls(
+        lut = UnprojectLUT(
             image_width=camera_model.image_width,
             image_height=camera_model.image_height,
             grid_width=grid_width,
@@ -468,26 +651,6 @@ class UnprojectLUT:
             source_model_spec=_camera_model_spec(camera_model),
         )
         return lut
-
-    @staticmethod
-    def _normalize_pixel_stride(
-        pixel_stride: float | tuple[float, float],
-    ) -> tuple[float, float]:
-        if isinstance(pixel_stride, tuple):
-            stride_x = float(pixel_stride[0])
-            stride_y = float(pixel_stride[1])
-        else:
-            stride_x = float(pixel_stride)
-            stride_y = float(pixel_stride)
-        if stride_x <= 0.0 or stride_y <= 0.0:
-            raise ValueError("pixel_stride values must be positive.")
-        return stride_x, stride_y
-
-    @staticmethod
-    def _grid_size_from_stride(image_size: int, stride: float) -> int:
-        if image_size <= 1:
-            return 1
-        return int(math.ceil((image_size - 1) / stride)) + 1
 
     @staticmethod
     def _sample_xy_grid(
@@ -827,8 +990,10 @@ class UnprojectLUT:
                 f"lensboy_version: {self.lensboy_version}",
                 f"source_model_type: {_format_optional_str(self.source_model_type)}",
                 f"source_model_spec_json_sha256: {source_model_spec_json_sha256}",
-                f"image_size_wh: {_format_csv([str(self.image_width), str(self.image_height)])}",
-                f"grid_size_wh: {_format_csv([str(self.grid_width), str(self.grid_height)])}",
+                "image_size_wh: "
+                + _format_csv([str(self.image_width), str(self.image_height)]),
+                "grid_size_wh: "
+                + _format_csv([str(self.grid_width), str(self.grid_height)]),
                 "grid_extents_xy: "
                 + _format_csv(
                     [

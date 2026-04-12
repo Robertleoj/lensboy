@@ -33,6 +33,7 @@ find_package(Eigen3 REQUIRED)
 
 find_package(fmt CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
+find_package(OpenMP REQUIRED)
 
 
 pybind11_add_module(
@@ -44,6 +45,7 @@ pybind11_add_module(
     cpp_src/matching_spline_model.cpp
     cpp_src/pinhole_splined_fine_tune.cpp
     cpp_src/normalize_pinhole_splined.cpp
+    cpp_src/seeded_normalize.cpp
 )
 
 target_compile_definitions(lensboy_bindings
@@ -59,6 +61,7 @@ target_link_libraries(
     Eigen3::Eigen
     fmt::fmt
     spdlog::spdlog
+    OpenMP::OpenMP_CXX
 )
 
 if(APPLE)

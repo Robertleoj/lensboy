@@ -6,7 +6,7 @@ import collections.abc
 import numpy
 import numpy.typing
 import typing
-__all__: list[str] = ['PinholeSplinedConfig', 'PinholeSplinedIntrinsicsParameters', 'WarpCoordinates', 'add', 'calibrate_opencv', 'fine_tune_pinhole_splined', 'get_matching_spline_distortion_model', 'make_undistortion_maps_pinhole_splined', 'normalize_pinhole_splined_points', 'project_pinhole_splined_points', 'set_log_level', 'warp_target_points']
+__all__: list[str] = ['PinholeSplinedConfig', 'PinholeSplinedIntrinsicsParameters', 'WarpCoordinates', 'add', 'calibrate_opencv', 'fine_tune_pinhole_splined', 'get_matching_spline_distortion_model', 'make_undistortion_maps_pinhole_splined', 'normalize_pinhole_splined_points', 'project_pinhole_splined_points', 'seeded_normalize_opencv', 'seeded_normalize_splined', 'set_log_level', 'warp_target_points']
 class PinholeSplinedConfig:
     def __init__(self, image_width: typing.SupportsInt, image_height: typing.SupportsInt, fov_deg_x: typing.SupportsFloat, fov_deg_y: typing.SupportsFloat, num_knots_x: typing.SupportsInt, num_knots_y: typing.SupportsInt, smoothness_lambda: typing.SupportsFloat) -> None:
         ...
@@ -115,6 +115,10 @@ def make_undistortion_maps_pinhole_splined(model_config: PinholeSplinedConfig, i
 def normalize_pinhole_splined_points(model_config: PinholeSplinedConfig, intrinsics: PinholeSplinedIntrinsicsParameters, pixel_coords: typing.Annotated[numpy.typing.ArrayLike, numpy.float64]) -> numpy.typing.NDArray[numpy.float64]:
     ...
 def project_pinhole_splined_points(model_config: PinholeSplinedConfig, intrinsics: PinholeSplinedIntrinsicsParameters, points_in_camera: typing.Annotated[numpy.typing.ArrayLike, numpy.float64]) -> numpy.typing.NDArray[numpy.float64]:
+    ...
+def seeded_normalize_opencv(seed_pixels: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], seed_normals: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], seed_w: typing.SupportsInt, seed_h: typing.SupportsInt, query_pixels: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], intrinsics: typing.Annotated[numpy.typing.ArrayLike, numpy.float64]) -> numpy.typing.NDArray[numpy.float64]:
+    ...
+def seeded_normalize_splined(seed_pixels: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], seed_normals: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], seed_w: typing.SupportsInt, seed_h: typing.SupportsInt, query_pixels: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], config: PinholeSplinedConfig, intrinsics: PinholeSplinedIntrinsicsParameters) -> numpy.typing.NDArray[numpy.float64]:
     ...
 def set_log_level(level: str) -> None:
     ...

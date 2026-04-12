@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from lensboy.analysis.unproject_lut import UnprojectLUTErrorHeatmap
 
 import cv2
 import matplotlib.colors as mcolors

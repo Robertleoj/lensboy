@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
@@ -534,10 +534,14 @@ class UnprojectLUTErrorHeatmap:
         interpolation: Interpolation mode represented by the heatmap.
         max_depth: Maximum adaptive subdivision depth.
         min_cell_size: Minimum subcell size in pixels.
-        cell_x_edges: Cell x edges with shape ``(grid_width,)`` or ``(grid_width + 1,)``.
-        cell_y_edges: Cell y edges with shape ``(grid_height,)`` or ``(grid_height + 1,)``.
-        max_angular_error_deg: Per-cell maximum angular error, shape ``(H, W)``.
-        error_direction_xy: Unit x/y direction of the local peak error, shape ``(H, W, 2)``.
+        cell_x_edges: Cell x edges, shape ``(grid_width,)``
+            or ``(grid_width + 1,)``.
+        cell_y_edges: Cell y edges, shape ``(grid_height,)``
+            or ``(grid_height + 1,)``.
+        max_angular_error_deg: Per-cell maximum angular error,
+            shape ``(H, W)``.
+        error_direction_xy: Unit x/y direction of the local peak
+            error, shape ``(H, W, 2)``.
         error_delta_xy: Peak x/y interpolation error vector, shape ``(H, W, 2)``.
         peak_pixel_xy: Pixel location of the local peak error, shape ``(H, W, 2)``.
 
@@ -626,7 +630,10 @@ class UnprojectLUTErrorHeatmap:
         """
         with np.load(Path(path)) as heatmap_data:
             return UnprojectLUTErrorHeatmap(
-                interpolation=str(np.asarray(heatmap_data["interpolation"]).item()),
+                interpolation=cast(
+                    InterpolationMode,
+                    str(np.asarray(heatmap_data["interpolation"]).item()),
+                ),
                 max_depth=int(np.asarray(heatmap_data["max_depth"]).item()),
                 min_cell_size=float(np.asarray(heatmap_data["min_cell_size"]).item()),
                 cell_x_edges=np.asarray(heatmap_data["cell_x_edges"], dtype=np.float64),
@@ -809,10 +816,13 @@ class UnprojectLUTAnalyzer:
             target_sample_count=target_sample_count,
         )
         exact_rays = self._normalize_points_exact()(sample_pixels)
-        approx_rays = self.lut.normalize_points(
-            sample_pixels,
-            interpolation=interpolation,
-            bounds="strict",
+        approx_rays = cast(
+            np.ndarray,
+            self.lut.normalize_points(
+                sample_pixels,
+                interpolation=interpolation,
+                bounds="strict",
+            ),
         )
         angular_error_deg = _angular_error_deg_from_xy(
             np.asarray(exact_rays[:, :2], dtype=np.float64),
@@ -866,7 +876,7 @@ class UnprojectLUTAnalyzer:
         max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
         min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
         title: str | None = None,
-        angular_unit: str = "mdeg",
+        angular_unit: Literal["deg", "mdeg", "udeg", "rad", "mrad", "urad"] = "mdeg",
         show_directions: bool = True,
         arrow_grid: int = 28,
         arrow_scale: float = 0.5,

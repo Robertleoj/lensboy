@@ -13,7 +13,7 @@ __all__ = [
 ]
 
 try:
-    from lensboy.analysis.plots import (
+    from lensboy.analysis.plots import (  # noqa: F401
         draw_points,
         plot_detection_coverage,
         plot_distortion_grid,

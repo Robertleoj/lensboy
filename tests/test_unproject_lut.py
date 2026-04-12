@@ -268,6 +268,7 @@ def test_linear_pinhole_lut_encodings(tmp_path: Path) -> None:
         loaded = lb.UnprojectLUT.load(file_path)
 
         approx = loaded.normalize_points(sample_pixels, interpolation="bilinear")
+        assert isinstance(approx, np.ndarray)
         max_abs_errors[encoding] = float(np.max(np.abs(approx[:, :2] - expected[:, :2])))
 
     assert max_abs_errors["float64_xy"] < 1e-12
@@ -434,7 +435,7 @@ def test_unproject_lut_analyzer_is_stable_across_num_workers() -> None:
 
 
 def test_unproject_lut_grid_stride_can_be_fractional() -> None:
-    """The stored sample spacing reflects the actual grid spacing and may be fractional."""
+    """The stored sample spacing reflects the actual grid spacing."""
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(6, 5))
 
@@ -545,6 +546,7 @@ def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
     pixels = np.column_stack([grid_x.ravel(), grid_y.ravel()])
     exact = model.normalize_points(pixels)
     approx = lut.normalize_points(pixels, interpolation="bilinear")
+    assert isinstance(approx, np.ndarray)
     dense_error = _query_error_deg(exact, approx)
     assert dense_error <= (report.max_angular_error_mdeg["bilinear"] / 1.0e3) + 1.0
 
@@ -697,7 +699,7 @@ def test_unproject_lut_rejects_nonfinite_payload_values(
 
 
 def test_unproject_lut_analyzer_can_save_and_load_error_heatmaps(tmp_path: Path) -> None:
-    """Analyzer-generated heatmaps can be saved and loaded without using the LUT header."""
+    """Analyzer heatmaps can be saved and loaded without the LUT header."""
     from lensboy.analysis import UnprojectLUTAnalyzer, UnprojectLUTErrorHeatmap
 
     model = _make_linear_pinhole_model()
@@ -738,7 +740,9 @@ def test_plot_unproject_lut_error_heatmap_supports_angular_units(tmp_path: Path)
         return_figure=True,
     )
     assert fig is not None
-    np.testing.assert_allclose(fig.axes[0].images[0].get_array(), expected_mdeg)
+    actual = fig.axes[0].images[0].get_array()
+    assert actual is not None
+    np.testing.assert_allclose(actual, expected_mdeg)
     assert (
         fig.axes[0].get_title() == "Per-cell max error heatmap (bilinear) [milli degrees]"
     )
