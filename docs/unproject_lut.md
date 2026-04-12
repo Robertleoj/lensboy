@@ -97,31 +97,30 @@ The plot helper accepts either:
 
 ## File format
 
-The `.unproject_LUT` file starts with an ASCII header followed by a binary payload. The payload offset is written into the header itself, so the header length can grow as needed.
+`UnprojectLUT.save(dir)` writes a directory containing two files:
 
-The header looks like this:
+- `metadata.json` -- scalar parameters (image size, grid extents, lensboy version).
+- `xy_grid.npy` -- the cached `(grid_height, grid_width, 2)` array of normalized `x/y` ray components, stored as little-endian `float32`.
 
-```text
-format: lensboy_unproject_LUT
-payload_offset_bytes: 382
-format_version: 1
-lensboy_version: 3.0.1
-image_size_wh: 3088, 2064
-grid_size_wh: 98, 66
-grid_extents_xy: 0, 3087, 0, 2063
-grid_stride_xy: 31.824742268041238, 31.738461538461539
-storage_encoding: float32_xy
-default_interpolation: bilinear
-default_bounds: strict
-payload_layout: row_major_interleaved_xy
-payload_endianness: little
-END_HEADER
+`metadata.json` looks like this:
+
+```json
+{
+    "lensboy-version": "3.0.1",
+    "image_width": 3088,
+    "image_height": 2064,
+    "grid_x_min": 0.0,
+    "grid_x_max": 3087.0,
+    "grid_y_min": 0.0,
+    "grid_y_max": 2063.0
+}
 ```
+
+`load()` rejects LUTs whose `lensboy-version` has a major version below 3.
 
 Notes:
 
-- `grid_stride_xy` is derived from the extents and grid size, so it may be fractional.
-- The binary payload is little-endian, row-major, interleaved `x/y`.
+- The third ray component is implicitly `1` and is reconstructed at query time.
 - The LUT is a pure runtime artifact -- it does not store the source camera model.
 
 ## Standalone C++ runtime
@@ -136,7 +135,7 @@ You can copy those two files into another project and load/query the LUT there:
 ```cpp
 #include "unproject_lut.hpp"
 
-auto lut = lensboy::UnprojectLUT::load("camera.unproject_LUT");
+auto lut = lensboy::UnprojectLUT::load("camera_lut/");
 auto result = lut.query(
     1280.0,
     720.0,

@@ -32,13 +32,7 @@ struct UnprojectLUTMetadata {
     double grid_x_max = 0.0;
     double grid_y_min = 0.0;
     double grid_y_max = 0.0;
-    double grid_stride_x = 0.0;
-    double grid_stride_y = 0.0;
-    std::string_view storage_encoding;
-    std::string_view default_interpolation;
-    std::string_view default_bounds;
     std::string_view lensboy_version;
-    std::size_t payload_offset_bytes = 0;
 };
 
 struct UnprojectLUTQueryResult {
@@ -52,7 +46,8 @@ struct UnprojectLUTQueryResult {
 
 class UnprojectLUT {
    public:
-    static UnprojectLUT load(std::string_view path);
+    // Load a LUT from a directory containing metadata.json and xy_grid.npy.
+    static UnprojectLUT load(std::string_view dir_path);
 
     UnprojectLUTMetadata const& metadata() const noexcept;
 

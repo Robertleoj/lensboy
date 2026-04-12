@@ -3,36 +3,18 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdint>
 #include <cstring>
 #include <fstream>
-#include <iterator>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
+#include <vector>
+
+#include "json.hpp"
+#include "npy.hpp"
 
 namespace lensboy {
 namespace {
-
-constexpr char const* k_format_name = "lensboy_unproject_LUT";
-constexpr int k_format_version = 1;
-constexpr char const* k_header_end_marker = "END_HEADER";
-constexpr char const* k_payload_layout = "row_major_interleaved_xy";
-constexpr char const* k_payload_endianness = "little";
-constexpr std::size_t k_max_header_bytes = 512 * 1024 * 1024;
-
-std::string trim(
-    std::string const& text
-) {
-    std::size_t const first = text.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return "";
-    }
-    std::size_t const last = text.find_last_not_of(" \t\r\n");
-    return text.substr(first, last - first + 1);
-}
 
 double quiet_nan() {
     return std::numeric_limits<double>::quiet_NaN();
@@ -42,189 +24,6 @@ bool is_finite(
     PixelXY const& value
 ) {
     return std::isfinite(value.xy[0]) and std::isfinite(value.xy[1]);
-}
-
-uint16_t read_little_endian_16(
-    char const* data
-) {
-    return static_cast<uint16_t>(static_cast<unsigned char>(data[0])) |
-           (static_cast<uint16_t>(static_cast<unsigned char>(data[1])) << 8);
-}
-
-uint32_t read_little_endian_32(
-    char const* data
-) {
-    return static_cast<uint32_t>(static_cast<unsigned char>(data[0])) |
-           (static_cast<uint32_t>(static_cast<unsigned char>(data[1])) << 8) |
-           (static_cast<uint32_t>(static_cast<unsigned char>(data[2])) << 16) |
-           (static_cast<uint32_t>(static_cast<unsigned char>(data[3])) << 24);
-}
-
-uint64_t read_little_endian_64(
-    char const* data
-) {
-    uint64_t value = 0;
-    for (int i = 0; i < 8; ++i) {
-        value |= static_cast<uint64_t>(static_cast<unsigned char>(data[i]))
-                 << (8 * i);
-    }
-    return value;
-}
-
-double float16_to_double(
-    uint16_t bits
-) {
-    uint16_t const sign = static_cast<uint16_t>((bits >> 15) & 0x1);
-    uint16_t const exponent = static_cast<uint16_t>((bits >> 10) & 0x1F);
-    uint16_t const mantissa = static_cast<uint16_t>(bits & 0x03FF);
-
-    if (exponent == 0) {
-        if (mantissa == 0) {
-            return sign == 0 ? 0.0 : -0.0;
-        }
-        double const fraction = static_cast<double>(mantissa) / 1024.0;
-        double const magnitude = std::ldexp(fraction, -14);
-        return sign == 0 ? magnitude : -magnitude;
-    }
-
-    if (exponent == 31) {
-        if (mantissa == 0) {
-            return sign == 0 ? std::numeric_limits<double>::infinity()
-                             : -std::numeric_limits<double>::infinity();
-        }
-        return quiet_nan();
-    }
-
-    double const fraction = 1.0 + static_cast<double>(mantissa) / 1024.0;
-    double const magnitude = std::ldexp(fraction, static_cast<int>(exponent) - 15);
-    return sign == 0 ? magnitude : -magnitude;
-}
-
-double decode_float32(
-    char const* data
-) {
-    uint32_t const bits = read_little_endian_32(data);
-    float value = 0.0f;
-    std::memcpy(&value, &bits, sizeof(value));
-    return static_cast<double>(value);
-}
-
-double decode_float64(
-    char const* data
-) {
-    uint64_t const bits = read_little_endian_64(data);
-    double value = 0.0;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-double decode_payload_value(
-    char const* data,
-    std::string const& storage_encoding
-) {
-    if (storage_encoding == "float16_xy") {
-        return float16_to_double(read_little_endian_16(data));
-    }
-    if (storage_encoding == "float32_xy") {
-        return decode_float32(data);
-    }
-    if (storage_encoding == "float64_xy") {
-        return decode_float64(data);
-    }
-    throw std::runtime_error("Unsupported storage encoding: " + storage_encoding);
-}
-
-std::size_t payload_item_size(
-    std::string const& storage_encoding
-) {
-    if (storage_encoding == "float16_xy") {
-        return 2;
-    }
-    if (storage_encoding == "float32_xy") {
-        return 4;
-    }
-    if (storage_encoding == "float64_xy") {
-        return 8;
-    }
-    throw std::runtime_error("Unsupported storage encoding: " + storage_encoding);
-}
-
-std::array<int, 2> parse_pair_of_ints(
-    std::string const& text,
-    std::string const& field_name
-) {
-    std::array<int, 2> values{};
-    std::stringstream stream(text);
-    std::string part;
-    for (int i = 0; i < 2; ++i) {
-        if (not std::getline(stream, part, ',')) {
-            throw std::runtime_error(
-                field_name + " must contain exactly 2 comma-separated values."
-            );
-        }
-        values[i] = std::stoi(trim(part));
-    }
-    if (std::getline(stream, part, ',')) {
-        throw std::runtime_error(
-            field_name + " must contain exactly 2 comma-separated values."
-        );
-    }
-    return values;
-}
-
-std::array<double, 4> parse_quad_of_doubles(
-    std::string const& text,
-    std::string const& field_name
-) {
-    std::array<double, 4> values{};
-    std::stringstream stream(text);
-    std::string part;
-    for (int i = 0; i < 4; ++i) {
-        if (not std::getline(stream, part, ',')) {
-            throw std::runtime_error(
-                field_name + " must contain exactly 4 comma-separated values."
-            );
-        }
-        values[i] = std::stod(trim(part));
-    }
-    if (std::getline(stream, part, ',')) {
-        throw std::runtime_error(
-            field_name + " must contain exactly 4 comma-separated values."
-        );
-    }
-    return values;
-}
-
-std::array<double, 2> parse_pair_of_doubles(
-    std::string const& text,
-    std::string const& field_name
-) {
-    std::array<double, 2> values{};
-    std::stringstream stream(text);
-    std::string part;
-    for (int i = 0; i < 2; ++i) {
-        if (not std::getline(stream, part, ',')) {
-            throw std::runtime_error(
-                field_name + " must contain exactly 2 comma-separated values."
-            );
-        }
-        values[i] = std::stod(trim(part));
-    }
-    if (std::getline(stream, part, ',')) {
-        throw std::runtime_error(
-            field_name + " must contain exactly 2 comma-separated values."
-        );
-    }
-    return values;
-}
-
-std::string parse_optional_string(
-    std::string const& text
-) {
-    if (text == "not_computed") {
-        return "";
-    }
-    return text;
 }
 
 std::array<double, 4> catmull_rom_weights(
@@ -326,181 +125,82 @@ UnprojectLUT::UnprojectLUT(
     }
 }
 
+namespace {
+
+}  // namespace
+
 UnprojectLUT UnprojectLUT::load(
-    std::string_view const path
+    std::string_view const dir_path
 ) {
-    std::ifstream file(std::string(path), std::ios::binary);
-    if (not file) {
-        throw std::runtime_error("Failed to open LUT file: " + std::string(path));
+    std::string const dir(dir_path);
+    std::string const metadata_path = dir + "/metadata.json";
+    std::string const xy_grid_path = dir + "/xy_grid.npy";
+
+    std::ifstream metadata_file(metadata_path);
+    if (not metadata_file) {
+        throw std::runtime_error("Failed to open metadata file: " + metadata_path);
+    }
+    nlohmann::json metadata = nlohmann::json::parse(metadata_file);
+
+    std::string const lensboy_version =
+        metadata.at("lensboy-version").get<std::string>();
+    auto const dot = lensboy_version.find('.');
+    std::string const major_str = lensboy_version.substr(0, dot);
+    int const major_version = std::stoi(major_str);
+    if (major_version < 3) {
+        throw std::runtime_error(
+            "This unproject LUT was created with an incompatible version of "
+            "lensboy (< 3.0.0). Please regenerate it with the current version."
+        );
     }
 
-    std::unordered_map<std::string, std::string> header;
-    std::string line;
-    std::size_t header_bytes = 0;
-    while (std::getline(file, line)) {
-        header_bytes += line.size() + 1;
-        if (header_bytes > k_max_header_bytes) {
-            throw std::runtime_error("Header exceeds the maximum supported size.");
+    std::vector<unsigned long> shape;
+    std::vector<float> raw;
+    bool fortran_order = false;
+    npy::LoadArrayFromNumpy<float>(xy_grid_path, shape, fortran_order, raw);
+    if (fortran_order) {
+        throw std::runtime_error("xy_grid.npy must be C-contiguous.");
+    }
+
+    if (shape.size() != 3 or shape[2] != 2) {
+        throw std::runtime_error("xy_grid.npy must have shape (H, W, 2).");
+    }
+    std::size_t const grid_height = static_cast<std::size_t>(shape[0]);
+    std::size_t const grid_width = static_cast<std::size_t>(shape[1]);
+
+    std::vector<double> xy_grid(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        if (not std::isfinite(raw[i])) {
+            throw std::runtime_error("xy_grid contains non-finite values.");
         }
-        std::string const trimmed = trim(line);
-        if (trimmed == k_header_end_marker) {
-            break;
-        }
-
-        std::size_t const colon = trimmed.find(':');
-        if (colon == std::string::npos) {
-            throw std::runtime_error(
-                "Invalid header line. Expected 'key: value'."
-            );
-        }
-
-        std::string const key = trim(trimmed.substr(0, colon));
-        std::string const value = trim(trimmed.substr(colon + 1));
-        if (key.empty()) {
-            throw std::runtime_error("Header keys must be non-empty.");
-        }
-        if (header.find(key) != header.end()) {
-            throw std::runtime_error("Duplicate header key: " + key);
-        }
-        header[key] = value;
+        xy_grid[i] = static_cast<double>(raw[i]);
     }
-
-    if (not file or trim(line) != k_header_end_marker) {
-        throw std::runtime_error("Reached end of file before END_HEADER.");
-    }
-
-    auto const require_field = [&header](std::string const& key) -> std::string const& {
-        auto const it = header.find(key);
-        if (it == header.end()) {
-            throw std::runtime_error("Missing required header field: " + key);
-        }
-        return it->second;
-    };
-
-    for (auto const& [key, _value] : header) {
-        bool const is_removed_field =
-            key == "error_report_mode" or
-            key == "error_report_max_depth" or
-            key == "error_report_min_cell_size" or
-            key.rfind("estimated_max_angular_error_", 0) == 0 or
-            key.rfind("estimated_median_angular_error_", 0) == 0;
-        if (is_removed_field) {
-            throw std::runtime_error(
-                "This runtime-only .unproject_LUT format does not support legacy "
-                "error-report header fields."
-            );
-        }
-    }
-
-    if (require_field("format") != k_format_name) {
-        throw std::runtime_error("Unsupported LUT format.");
-    }
-    int const format_version = std::stoi(require_field("format_version"));
-    if (format_version != k_format_version) {
-        throw std::runtime_error("Unsupported LUT format_version.");
-    }
-    if (require_field("payload_layout") != k_payload_layout) {
-        throw std::runtime_error("Unsupported payload_layout.");
-    }
-    if (require_field("payload_endianness") != k_payload_endianness) {
-        throw std::runtime_error("Unsupported payload_endianness.");
-    }
-    std::streampos const payload_offset = file.tellg();
-    if (payload_offset < 0) {
-        throw std::runtime_error("Failed to determine payload offset.");
-    }
-    std::size_t const payload_offset_bytes = static_cast<std::size_t>(payload_offset);
-    std::size_t const declared_payload_offset_bytes = static_cast<std::size_t>(
-        std::stoull(require_field("payload_offset_bytes"))
-    );
-    if (payload_offset_bytes != declared_payload_offset_bytes) {
-        throw std::runtime_error("payload_offset_bytes does not match payload position.");
-    }
-
-    std::array<int, 2> const image_size =
-        parse_pair_of_ints(require_field("image_size_wh"), "image_size_wh");
-    std::array<int, 2> const grid_size =
-        parse_pair_of_ints(require_field("grid_size_wh"), "grid_size_wh");
-    std::array<double, 4> const extents =
-        parse_quad_of_doubles(require_field("grid_extents_xy"), "grid_extents_xy");
-    std::array<double, 2> const grid_stride =
-        parse_pair_of_doubles(require_field("grid_stride_xy"), "grid_stride_xy");
-    double const expected_grid_stride_x =
-        grid_size[0] <= 1 ? 0.0 : (extents[1] - extents[0]) / static_cast<double>(grid_size[0] - 1);
-    double const expected_grid_stride_y =
-        grid_size[1] <= 1 ? 0.0 : (extents[3] - extents[2]) / static_cast<double>(grid_size[1] - 1);
-    if (std::abs(grid_stride[0] - expected_grid_stride_x) > 1e-12 or
-        std::abs(grid_stride[1] - expected_grid_stride_y) > 1e-12) {
-        throw std::runtime_error("grid_stride_xy does not match grid_extents_xy and grid_size_wh.");
-    }
-
-    std::string const storage_encoding = require_field("storage_encoding");
-    std::size_t const item_size = payload_item_size(storage_encoding);
-    std::size_t const expected_payload_bytes =
-        static_cast<std::size_t>(grid_size[0]) *
-        static_cast<std::size_t>(grid_size[1]) * 2 * item_size;
-
-    std::vector<char> payload(
-        (std::istreambuf_iterator<char>(file)),
-        std::istreambuf_iterator<char>()
-    );
-    if (payload.size() != expected_payload_bytes) {
-        throw std::runtime_error("Unexpected payload size.");
-    }
-
-    std::vector<double> xy_grid(
-        static_cast<std::size_t>(grid_size[0]) *
-        static_cast<std::size_t>(grid_size[1]) * 2
-    );
-    for (std::size_t i = 0; i < xy_grid.size(); ++i) {
-        xy_grid[i] =
-            decode_payload_value(payload.data() + i * item_size, storage_encoding);
-        if (not std::isfinite(xy_grid[i])) {
-            throw std::runtime_error("Payload contains non-finite values.");
-        }
-    }
-
-    std::string const default_interpolation = require_field("default_interpolation");
-    std::string const default_bounds = require_field("default_bounds");
-    std::string const lensboy_version = require_field("lensboy_version");
 
     std::vector<char> string_storage;
-    string_storage.reserve(
-        storage_encoding.size() +
-        default_interpolation.size() +
-        default_bounds.size() +
-        lensboy_version.size() +
-        8
-    );
+    string_storage.reserve(lensboy_version.size() + 1);
+    auto const append = [&string_storage](std::string const& text) {
+        if (text.empty()) return std::string_view{};
+        std::size_t const offset = string_storage.size();
+        string_storage.insert(string_storage.end(), text.begin(), text.end());
+        string_storage.push_back('\0');
+        return std::string_view(string_storage.data() + offset, text.size());
+    };
 
-    UnprojectLUTMetadata metadata;
-    metadata.image_width = static_cast<std::size_t>(image_size[0]);
-    metadata.image_height = static_cast<std::size_t>(image_size[1]);
-    metadata.grid_width = static_cast<std::size_t>(grid_size[0]);
-    metadata.grid_height = static_cast<std::size_t>(grid_size[1]);
-    metadata.grid_x_min = extents[0];
-    metadata.grid_x_max = extents[1];
-    metadata.grid_y_min = extents[2];
-    metadata.grid_y_max = extents[3];
-    metadata.grid_stride_x = grid_stride[0];
-    metadata.grid_stride_y = grid_stride[1];
-    metadata.storage_encoding = append_string_view(string_storage, storage_encoding);
-    metadata.default_interpolation = append_string_view(
-        string_storage,
-        default_interpolation
-    );
-    metadata.default_bounds = append_string_view(
-        string_storage,
-        default_bounds
-    );
-    metadata.lensboy_version = append_string_view(
-        string_storage,
-        lensboy_version
-    );
-    metadata.payload_offset_bytes = payload_offset_bytes;
+    UnprojectLUTMetadata lut_metadata;
+    lut_metadata.image_width =
+        metadata.at("image_width").get<std::size_t>();
+    lut_metadata.image_height =
+        metadata.at("image_height").get<std::size_t>();
+    lut_metadata.grid_width = grid_width;
+    lut_metadata.grid_height = grid_height;
+    lut_metadata.grid_x_min = metadata.at("grid_x_min").get<double>();
+    lut_metadata.grid_x_max = metadata.at("grid_x_max").get<double>();
+    lut_metadata.grid_y_min = metadata.at("grid_y_min").get<double>();
+    lut_metadata.grid_y_max = metadata.at("grid_y_max").get<double>();
+    lut_metadata.lensboy_version = append(lensboy_version);
 
     return UnprojectLUT(
-        std::move(metadata),
+        std::move(lut_metadata),
         std::move(xy_grid),
         std::move(string_storage)
     );

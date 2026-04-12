@@ -38,81 +38,6 @@ def _load_spline_model() -> lb.PinholeSplined:
     return lb.PinholeSplined.load(DATA_DIR / "spline.json")
 
 
-def _header_and_payload(file_path: Path) -> tuple[str, bytes]:
-    data = file_path.read_bytes()
-    marker = b"END_HEADER\n"
-    index = data.index(marker) + len(marker)
-    return data[:index].decode("ascii"), data[index:]
-
-
-def _rewrite_header_field(
-    file_path: Path,
-    key: str,
-    new_value: str,
-    *,
-    recompute_payload_offset: bool = True,
-) -> None:
-    header, payload = _header_and_payload(file_path)
-    lines = header.splitlines()
-    for i, line in enumerate(lines):
-        if line.startswith(f"{key}:"):
-            lines[i] = f"{key}: {new_value}"
-            break
-    else:
-        raise AssertionError(f"Missing header key {key!r}.")
-
-    if recompute_payload_offset:
-        payload_offset_index = None
-        for i, line in enumerate(lines):
-            if line.startswith("payload_offset_bytes:"):
-                payload_offset_index = i
-                break
-        if payload_offset_index is not None:
-            payload_offset_text = "0"
-            while True:
-                lines[payload_offset_index] = (
-                    f"payload_offset_bytes: {payload_offset_text}"
-                )
-                header_text = "\n".join(lines) + "\n"
-                next_payload_offset_text = str(len(header_text.encode("ascii")))
-                if next_payload_offset_text == payload_offset_text:
-                    break
-                payload_offset_text = next_payload_offset_text
-
-    file_path.write_bytes(("\n".join(lines) + "\n").encode("ascii") + payload)
-
-
-def _append_header_field(file_path: Path, key: str, value: str) -> None:
-    header, payload = _header_and_payload(file_path)
-    lines = header.splitlines()
-    end_header_index = lines.index("END_HEADER")
-    lines.insert(end_header_index, f"{key}: {value}")
-
-    payload_offset_index = lines.index(
-        next(line for line in lines if line.startswith("payload_offset_bytes:"))
-    )
-    payload_offset_text = "0"
-    while True:
-        lines[payload_offset_index] = f"payload_offset_bytes: {payload_offset_text}"
-        header_text = "\n".join(lines) + "\n"
-        next_payload_offset_text = str(len(header_text.encode("ascii")))
-        if next_payload_offset_text == payload_offset_text:
-            break
-        payload_offset_text = next_payload_offset_text
-
-    file_path.write_bytes(("\n".join(lines) + "\n").encode("ascii") + payload)
-
-
-def _parse_header_text(header: str) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for line in header.splitlines():
-        if line == "END_HEADER":
-            continue
-        key, value = line.split(": ", 1)
-        parsed[key] = value
-    return parsed
-
-
 def _random_pixels(
     model: lb.CameraModel,
     n: int = 128,
@@ -134,54 +59,27 @@ def _query_error_deg(
     return float(np.max(np.rad2deg(np.arccos(np.clip(dots, -1.0, 1.0)))))
 
 
-def test_unproject_lut_header_is_human_readable(tmp_path: Path) -> None:
-    """The text header surfaces key metadata near the top of the file."""
+def test_unproject_lut_save_load_writes_expected_files(tmp_path: Path) -> None:
+    """save() writes a directory with metadata.json and xy_grid.npy."""
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(5, 4))
 
-    file_path = tmp_path / "linear.unproject_LUT"
-    lut.save(file_path)
+    dir_path = tmp_path / "lut"
+    lut.save(dir_path)
 
-    header, _ = _header_and_payload(file_path)
-    header_fields = _parse_header_text(header)
-    header_lines = header.splitlines()
-    first_lines = header_lines[:16]
+    assert (dir_path / "metadata.json").is_file()
+    assert (dir_path / "xy_grid.npy").is_file()
 
-    assert header_fields["format_version"] == "1"
-    assert first_lines[0] == "format: lensboy_unproject_LUT"
-    assert first_lines[1].startswith("payload_offset_bytes: ")
-    assert first_lines[2] == "format_version: 1"
-    assert first_lines[3].startswith("lensboy_version: ")
-    assert first_lines[4] == "image_size_wh: 17, 13"
-    assert first_lines[5] == "grid_size_wh: 5, 4"
-    assert first_lines[6] == "grid_extents_xy: 0, 16, 0, 12"
-    assert first_lines[7] == "grid_stride_xy: 4, 4"
-    assert first_lines[8] == "storage_encoding: float64_xy"
-    assert first_lines[9] == "default_interpolation: bilinear"
-    assert first_lines[10] == "default_bounds: strict"
-    assert first_lines[11] == "payload_layout: row_major_interleaved_xy"
-    assert first_lines[12] == "payload_endianness: little"
-    assert not any(line.startswith("source_model_spec") for line in header.splitlines())
-    assert not any(line.startswith("source_model_type") for line in header.splitlines())
-    assert int(header_fields["payload_offset_bytes"]) == len(header.encode("ascii"))
+    import json as _json
 
+    metadata = _json.loads((dir_path / "metadata.json").read_text())
+    assert metadata["lensboy-version"].split(".")[0] >= "3"
+    assert metadata["image_width"] == 17
+    assert metadata["image_height"] == 13
 
-def test_unproject_lut_exposes_serialized_file_metadata(tmp_path: Path) -> None:
-    """The runtime object exposes its serialized header and size information."""
-    model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(grid_size_wh=(5, 4))
-    file_path = tmp_path / "linear.unproject_LUT"
-
-    lut.save(file_path)
-    loaded = lb.UnprojectLUT.load(file_path)
-    header, payload = _header_and_payload(file_path)
-
-    assert loaded.header_text == header
-    assert loaded.payload_offset_bytes == len(header.encode("ascii"))
-    assert loaded.payload_bytes == len(payload)
-    assert loaded.total_bytes == file_path.stat().st_size
-    assert loaded.header_preview() == header.rstrip("\n")
-    assert loaded.header_preview(12) == "\n".join(header.splitlines()[:12])
+    xy_grid = np.load(dir_path / "xy_grid.npy")
+    assert xy_grid.shape == (4, 5, 2)
+    assert xy_grid.dtype == np.float32
 
 
 @pytest.mark.parametrize(
@@ -194,17 +92,13 @@ def test_unproject_lut_round_trip_for_camera_models(
 ) -> None:
     """OpenCV and spline models survive LUT save/load round trips."""
     model = factory()
-    lut = model.get_unproject_lut(
-        grid_size_wh=(11, 9),
-        storage_encoding="float64_xy",
-    )
+    lut = model.get_unproject_lut(grid_size_wh=(11, 9))
 
-    file_path = tmp_path / "round_trip.unproject_LUT"
-    lut.save(file_path)
-    loaded = lb.UnprojectLUT.load(file_path)
+    dir_path = tmp_path / "round_trip_lut"
+    lut.save(dir_path)
+    loaded = lb.UnprojectLUT.load(dir_path)
 
     assert loaded.grid_size_wh == (11, 9)
-    assert loaded.storage_encoding == "float64_xy"
 
     x_coords = np.linspace(0.0, model.image_width - 1, loaded.grid_width)
     y_coords = np.linspace(0.0, model.image_height - 1, loaded.grid_height)
@@ -213,34 +107,24 @@ def test_unproject_lut_round_trip_for_camera_models(
 
     expected = model.normalize_points(pixels)
     actual = loaded.normalize_points(pixels, interpolation="bilinear")
-    np.testing.assert_allclose(actual, expected, atol=1e-12)
+    np.testing.assert_allclose(actual, expected, atol=1e-5)
 
 
-def test_linear_pinhole_lut_encodings(tmp_path: Path) -> None:
-    """Linear pinhole data isolates storage-encoding error from interpolation error."""
+def test_linear_pinhole_lut_round_trips_through_float32(tmp_path: Path) -> None:
+    """Linear pinhole data round-trips through the float32 LUT format."""
     model = _make_linear_pinhole_model()
     sample_pixels = _random_pixels(model, seed=4)
     expected = model.normalize_points(sample_pixels)
-    max_abs_errors: dict[str, float] = {}
 
-    for encoding in ("float64_xy", "float32_xy", "float16_xy"):
-        lut = model.get_unproject_lut(
-            grid_size_wh=(6, 5),
-            storage_encoding=encoding,
-        )
-        file_path = tmp_path / f"{encoding}.unproject_LUT"
-        lut.save(file_path)
-        loaded = lb.UnprojectLUT.load(file_path)
+    lut = model.get_unproject_lut(grid_size_wh=(6, 5))
+    dir_path = tmp_path / "lut"
+    lut.save(dir_path)
+    loaded = lb.UnprojectLUT.load(dir_path)
 
-        approx = loaded.normalize_points(sample_pixels, interpolation="bilinear")
-        assert isinstance(approx, np.ndarray)
-        max_abs_errors[encoding] = float(np.max(np.abs(approx[:, :2] - expected[:, :2])))
-
-    assert max_abs_errors["float64_xy"] < 1e-12
-    assert max_abs_errors["float32_xy"] < 1e-6
-    assert max_abs_errors["float16_xy"] < 1e-3
-    assert max_abs_errors["float64_xy"] <= max_abs_errors["float32_xy"] + 1e-15
-    assert max_abs_errors["float32_xy"] <= max_abs_errors["float16_xy"] + 1e-15
+    approx = loaded.normalize_points(sample_pixels, interpolation="bilinear")
+    assert isinstance(approx, np.ndarray)
+    max_abs_error = float(np.max(np.abs(approx[:, :2] - expected[:, :2])))
+    assert max_abs_error < 1e-6
 
 
 def test_unproject_lut_analyzer_can_report_multiple_interpolations() -> None:
@@ -287,9 +171,9 @@ def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path)
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    file_path = tmp_path / "opencv.unproject_LUT"
-    lut.save(file_path)
-    loaded = lb.UnprojectLUT.load(file_path)
+    dir_path = tmp_path / "opencv_lut"
+    lut.save(dir_path)
+    loaded = lb.UnprojectLUT.load(dir_path)
 
     report_before = estimate_lut_accuracy(
         lut, model, interpolations=("nearest", "bilinear", "bicubic")
@@ -301,10 +185,10 @@ def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path)
     assert report_after.interpolations == report_before.interpolations
     for mode in report_before.interpolations:
         assert report_after.max_angular_error_mdeg[mode] == pytest.approx(
-            report_before.max_angular_error_mdeg[mode]
+            report_before.max_angular_error_mdeg[mode], rel=1e-3
         )
         assert report_after.median_angular_error_mdeg[mode] == pytest.approx(
-            report_before.median_angular_error_mdeg[mode]
+            report_before.median_angular_error_mdeg[mode], rel=1e-3
         )
 
 
@@ -347,7 +231,7 @@ def test_unproject_lut_analyzer_dense_accuracy_grid_is_exact_for_linear_model() 
         lut, model, interpolation="bilinear", target_sample_count=2500
     )
 
-    np.testing.assert_allclose(sample.approx_rays, sample.exact_rays, atol=1e-12)
+    np.testing.assert_allclose(sample.approx_rays, sample.exact_rays, atol=1e-5)
     assert sample.max_angular_error_mdeg < 1e-2
 
 
@@ -394,7 +278,7 @@ def test_unproject_lut_bounds_modes_match_expected_behavior() -> None:
     )
     clamp_expected = model.normalize_points(clamped_pixels)
     clamp_actual = lut.normalize_points(pixels, interpolation="bilinear", bounds="clamp")
-    np.testing.assert_allclose(clamp_actual, clamp_expected, atol=1e-12)
+    np.testing.assert_allclose(clamp_actual, clamp_expected, atol=1e-5)
 
     extrap_expected = model.normalize_points(pixels)
     extrap_actual = lut.normalize_points(
@@ -402,7 +286,7 @@ def test_unproject_lut_bounds_modes_match_expected_behavior() -> None:
         interpolation="bilinear",
         bounds="extrapolate",
     )
-    np.testing.assert_allclose(extrap_actual, extrap_expected, atol=1e-12)
+    np.testing.assert_allclose(extrap_actual, extrap_expected, atol=1e-5)
 
 
 def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> None:
@@ -420,7 +304,7 @@ def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> 
     np.testing.assert_allclose(
         small_lut.normalize_points(sample_pixels, interpolation="bicubic"),
         small_lut.normalize_points(sample_pixels, interpolation="bilinear"),
-        atol=1e-12,
+        atol=1e-5,
     )
 
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
@@ -437,7 +321,7 @@ def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> 
     np.testing.assert_allclose(
         lut.normalize_points(boundary_pixels, interpolation="bicubic", bounds="clamp"),
         lut.normalize_points(boundary_pixels, interpolation="bilinear", bounds="clamp"),
-        atol=1e-12,
+        atol=1e-5,
     )
 
 
@@ -468,113 +352,38 @@ def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
     assert dense_error <= (report.max_angular_error_mdeg["bilinear"] / 1.0e3) + 1.0
 
 
-def test_unproject_lut_rejects_wrong_suffix(tmp_path: Path) -> None:
-    """Saving requires the `.unproject_LUT` suffix."""
+def test_unproject_lut_rejects_unsupported_lensboy_version(tmp_path: Path) -> None:
+    """Loading validates the metadata lensboy-version."""
+    import json as _json
+
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(4, 4))
+    dir_path = tmp_path / "bad_version_lut"
+    lut.save(dir_path)
 
-    with pytest.raises(ValueError, match=".unproject_LUT"):
-        lut.save(tmp_path / "invalid.bin")
+    metadata_path = dir_path / "metadata.json"
+    metadata = _json.loads(metadata_path.read_text())
+    metadata["lensboy-version"] = "2.9.0"
+    metadata_path.write_text(_json.dumps(metadata))
 
-
-def test_unproject_lut_rejects_missing_header_marker(tmp_path: Path) -> None:
-    """Loading fails cleanly when the text header is incomplete."""
-    file_path = tmp_path / "broken.unproject_LUT"
-    file_path.write_bytes(b"format: lensboy_unproject_LUT\n")
-
-    with pytest.raises(ValueError, match="END_HEADER"):
-        lb.UnprojectLUT.load(file_path)
+    with pytest.raises(ValueError, match="incompatible version"):
+        lb.UnprojectLUT.load(dir_path)
 
 
-def test_unproject_lut_rejects_invalid_header_line(tmp_path: Path) -> None:
-    """Loading fails when a header line does not follow `key: value`."""
-    file_path = tmp_path / "broken.unproject_LUT"
-    file_path.write_bytes(b"format lensboy_unproject_LUT\nEND_HEADER\n")
-
-    with pytest.raises(ValueError, match="key: value"):
-        lb.UnprojectLUT.load(file_path)
-
-
-def test_unproject_lut_rejects_bad_payload_offset(tmp_path: Path) -> None:
-    """Loading validates the declared payload byte offset."""
+def test_unproject_lut_rejects_nonfinite_grid_values(tmp_path: Path) -> None:
+    """The dataclass rejects non-finite xy_grid values on load."""
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(4, 4))
-    file_path = tmp_path / "bad_offset.unproject_LUT"
-    lut.save(file_path)
+    dir_path = tmp_path / "nonfinite_lut"
+    lut.save(dir_path)
 
-    _rewrite_header_field(
-        file_path,
-        "payload_offset_bytes",
-        "1",
-        recompute_payload_offset=False,
-    )
-
-    with pytest.raises(ValueError, match="payload_offset_bytes"):
-        lb.UnprojectLUT.load(file_path)
-
-
-def test_unproject_lut_rejects_legacy_error_report_header_fields(tmp_path: Path) -> None:
-    """Loading rejects the older mixed runtime-and-analysis header shape."""
-    model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(grid_size_wh=(4, 4))
-    file_path = tmp_path / "legacy_error_report.unproject_LUT"
-    lut.save(file_path)
-
-    _append_header_field(
-        file_path,
-        "estimated_max_angular_error_mdeg_bilinear",
-        "12.5",
-    )
-
-    with pytest.raises(ValueError, match="legacy error-report header fields"):
-        lb.UnprojectLUT.load(file_path)
-
-
-def test_unproject_lut_rejects_unsupported_storage_encoding(tmp_path: Path) -> None:
-    """Loading validates the declared storage encoding."""
-    model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(grid_size_wh=(4, 4))
-    file_path = tmp_path / "encoding.unproject_LUT"
-    lut.save(file_path)
-
-    _rewrite_header_field(file_path, "storage_encoding", "float128_xy")
-
-    with pytest.raises(ValueError, match="Unsupported storage encoding"):
-        lb.UnprojectLUT.load(file_path)
-
-
-def test_unproject_lut_rejects_truncated_payload(tmp_path: Path) -> None:
-    """Loading validates the binary payload length."""
-    model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(grid_size_wh=(4, 4))
-    file_path = tmp_path / "truncated.unproject_LUT"
-    lut.save(file_path)
-
-    header, payload = _header_and_payload(file_path)
-    file_path.write_bytes(header.encode("ascii") + payload[:-3])
-
-    with pytest.raises(ValueError, match="Unexpected payload size"):
-        lb.UnprojectLUT.load(file_path)
-
-
-@pytest.mark.parametrize("replacement", [np.nan, np.inf])
-def test_unproject_lut_rejects_nonfinite_payload_values(
-    tmp_path: Path,
-    replacement: float,
-) -> None:
-    """Loading rejects NaN and infinity in the cached payload."""
-    model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(grid_size_wh=(4, 4))
-    file_path = tmp_path / "nonfinite.unproject_LUT"
-    lut.save(file_path)
-
-    header, payload = _header_and_payload(file_path)
-    payload_array = np.frombuffer(payload, dtype="<f8").copy()
-    payload_array[0] = replacement
-    file_path.write_bytes(header.encode("ascii") + payload_array.tobytes())
+    grid_path = dir_path / "xy_grid.npy"
+    xy_grid = np.load(grid_path)
+    xy_grid[0, 0, 0] = np.nan
+    np.save(grid_path, xy_grid, allow_pickle=False)
 
     with pytest.raises(ValueError, match="finite"):
-        lb.UnprojectLUT.load(file_path)
+        lb.UnprojectLUT.load(dir_path)
 
 
 def test_unproject_lut_analyzer_can_save_and_load_error_heatmaps(tmp_path: Path) -> None:
@@ -668,11 +477,8 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
         pytest.skip("No C++ compiler available.")
 
     model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(
-        grid_size_wh=(6, 5),
-        storage_encoding="float16_xy",
-    )
-    lut_path = tmp_path / "cpp_round_trip.unproject_LUT"
+    lut = model.get_unproject_lut(grid_size_wh=(6, 5))
+    lut_path = tmp_path / "cpp_round_trip_lut"
     lut.save(lut_path)
     loaded = lb.UnprojectLUT.load(lut_path)
 
@@ -767,7 +573,7 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
     np.testing.assert_allclose(
         np.array([float(q0_tokens[1]), float(q0_tokens[2]), float(q0_tokens[3])]),
         python_q0,
-        atol=1e-12,
+        atol=1e-5,
     )
 
     assert lines[1] == "0"
@@ -782,7 +588,7 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
     np.testing.assert_allclose(
         np.array([float(q2_tokens[1]), float(q2_tokens[2]), float(q2_tokens[3])]),
         python_q2,
-        atol=1e-12,
+        atol=1e-5,
     )
 
     q3_tokens = lines[3].split()

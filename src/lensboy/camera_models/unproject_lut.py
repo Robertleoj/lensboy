@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from importlib.metadata import version as _package_version
@@ -15,25 +16,16 @@ if TYPE_CHECKING:
 
 InterpolationMode = Literal["nearest", "bilinear", "bicubic"]
 BoundsMode = Literal["strict", "clamp", "extrapolate"]
-StorageEncoding = Literal["float64_xy", "float32_xy", "float16_xy"]
 
-_FORMAT_NAME = "lensboy_unproject_LUT"
-_FORMAT_VERSION = 1
-_HEADER_END_MARKER = "END_HEADER"
-_PAYLOAD_LAYOUT = "row_major_interleaved_xy"
-_PAYLOAD_ENDIANNESS = "little"
+_METADATA_FILENAME = "metadata.json"
+_XY_GRID_FILENAME = "xy_grid.npy"
+_STORAGE_DTYPE = np.dtype("<f4")
 _SUPPORTED_INTERPOLATIONS: tuple[InterpolationMode, ...] = (
     "nearest",
     "bilinear",
     "bicubic",
 )
 _SUPPORTED_BOUNDS: tuple[BoundsMode, ...] = ("strict", "clamp", "extrapolate")
-_SUPPORTED_ENCODINGS: dict[StorageEncoding, np.dtype] = {
-    "float64_xy": np.dtype("<f8"),
-    "float32_xy": np.dtype("<f4"),
-    "float16_xy": np.dtype("<f2"),
-}
-_MAX_HEADER_BYTES = 512 * 1024 * 1024
 
 
 def _validate_interpolation_mode(interpolation: str) -> InterpolationMode:
@@ -51,48 +43,6 @@ def _validate_bounds_mode(bounds: str) -> BoundsMode:
             f"Unsupported bounds mode {bounds!r}. Expected one of {_SUPPORTED_BOUNDS}."
         )
     return bounds  # type: ignore[return-value]
-
-
-def _validate_storage_encoding(storage_encoding: str) -> StorageEncoding:
-    if storage_encoding not in _SUPPORTED_ENCODINGS:
-        raise ValueError(
-            f"Unsupported storage encoding {storage_encoding!r}. "
-            f"Expected one of {tuple(_SUPPORTED_ENCODINGS)}."
-        )
-    return storage_encoding  # type: ignore[return-value]
-
-
-def _parse_pair_of_ints(text: str, field_name: str) -> tuple[int, int]:
-    parts = [part.strip() for part in text.split(",")]
-    if len(parts) != 2:
-        raise ValueError(f"{field_name} must contain exactly 2 comma-separated values.")
-    return int(parts[0]), int(parts[1])
-
-
-def _parse_quad_of_floats(
-    text: str, field_name: str
-) -> tuple[float, float, float, float]:
-    parts = [part.strip() for part in text.split(",")]
-    if len(parts) != 4:
-        raise ValueError(f"{field_name} must contain exactly 4 comma-separated values.")
-    return float(parts[0]), float(parts[1]), float(parts[2]), float(parts[3])
-
-
-def _parse_pair_of_floats(text: str, field_name: str) -> tuple[float, float]:
-    parts = [part.strip() for part in text.split(",")]
-    if len(parts) != 2:
-        raise ValueError(f"{field_name} must contain exactly 2 comma-separated values.")
-    return float(parts[0]), float(parts[1])
-
-
-def _format_float(value: float) -> str:
-    if math.isnan(value):
-        return "not_computed"
-    return f"{value:.17g}"
-
-
-def _format_csv(values: list[str]) -> str:
-    return ", ".join(values)
 
 
 def _catmull_rom_weights(t: np.ndarray) -> np.ndarray:
@@ -203,7 +153,6 @@ def _sample_xy_grid_seeded(
     *,
     x_coords: np.ndarray,
     y_coords: np.ndarray,
-    payload_dtype: np.dtype,
 ) -> np.ndarray:
     """Sample the unproject grid using seeded C++ normalization.
 
@@ -215,7 +164,6 @@ def _sample_xy_grid_seeded(
         camera_model: Camera model to sample.
         x_coords: Grid x pixel coordinates, shape ``(grid_width,)``.
         y_coords: Grid y pixel coordinates, shape ``(grid_height,)``.
-        payload_dtype: Storage dtype for quantization simulation.
 
     Returns:
         Sampled xy grid, shape ``(grid_height, grid_width, 2)``.
@@ -268,9 +216,6 @@ def _sample_xy_grid_seeded(
         )
 
     xy = np.asarray(rays[:, :2], dtype=np.float64)
-    if payload_dtype != np.dtype(np.float64):
-        xy = np.asarray(xy, dtype=payload_dtype).astype(np.float64)
-
     return xy.reshape(grid_height, grid_width, 2)
 
 
@@ -311,10 +256,7 @@ class UnprojectLUT:
         grid_x_max: Maximum pixel x covered by the LUT.
         grid_y_min: Minimum pixel y covered by the LUT.
         grid_y_max: Maximum pixel y covered by the LUT.
-        storage_encoding: On-disk payload encoding.
         xy_grid: Cached x/y ray components with shape ``(grid_height, grid_width, 2)``.
-        default_interpolation: Default interpolation mode for runtime queries.
-        default_bounds: Default bounds behavior for runtime queries.
         lensboy_version: Package version that produced the LUT.
 
     Returns:
@@ -329,20 +271,12 @@ class UnprojectLUT:
     grid_x_max: float
     grid_y_min: float
     grid_y_max: float
-    storage_encoding: StorageEncoding
     xy_grid: np.ndarray
-    default_interpolation: InterpolationMode = "bilinear"
-    default_bounds: BoundsMode = "strict"
     lensboy_version: str = field(default_factory=lambda: _package_version("lensboy"))
     _grid_scale_x: float = field(init=False, repr=False)
     _grid_scale_y: float = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.storage_encoding = _validate_storage_encoding(self.storage_encoding)
-        self.default_interpolation = _validate_interpolation_mode(
-            self.default_interpolation
-        )
-        self.default_bounds = _validate_bounds_mode(self.default_bounds)
         if self.image_width <= 0 or self.image_height <= 0:
             raise ValueError("image dimensions must be positive.")
         if self.grid_width <= 0 or self.grid_height <= 0:
@@ -370,8 +304,7 @@ class UnprojectLUT:
     def __repr__(self) -> str:
         return (
             f"UnprojectLUT(image={self.image_width}x{self.image_height}, "
-            f"grid={self.grid_width}x{self.grid_height}, "
-            f"encoding={self.storage_encoding})"
+            f"grid={self.grid_width}x{self.grid_height})"
         )
 
     @property
@@ -409,59 +342,6 @@ class UnprojectLUT:
         return float(stride_x), float(stride_y)
 
     @property
-    def header_text(self) -> str:
-        """Return the ASCII file header for this LUT.
-
-        Returns:
-            Header text exactly as it would be written before the binary payload.
-        """
-        return self._encode_header()
-
-    @property
-    def payload_offset_bytes(self) -> int:
-        """Return the byte offset where the binary payload begins.
-
-        Returns:
-            Number of bytes occupied by the serialized ASCII header.
-        """
-        return len(self.header_text.encode("ascii"))
-
-    @property
-    def payload_bytes(self) -> int:
-        """Return the size of the serialized binary payload.
-
-        Returns:
-            Number of bytes in the row-major interleaved x/y payload.
-        """
-        dtype = _SUPPORTED_ENCODINGS[self.storage_encoding]
-        return self.grid_width * self.grid_height * 2 * dtype.itemsize
-
-    @property
-    def total_bytes(self) -> int:
-        """Return the total serialized file size for this LUT.
-
-        Returns:
-            Number of bytes in the full `.unproject_LUT` file.
-        """
-        return self.payload_offset_bytes + self.payload_bytes
-
-    def header_preview(self, max_lines: int = 0) -> str:
-        """Return a short human-readable preview of the file header.
-
-        Args:
-            max_lines: Maximum number of header lines to include. Use ``0`` to
-                include the full header.
-
-        Returns:
-            Preview text containing the first header lines.
-        """
-        if max_lines < 0:
-            raise ValueError("max_lines must be non-negative.")
-        if max_lines == 0:
-            return self.header_text.rstrip("\n")
-        return "\n".join(self.header_text.splitlines()[:max_lines])
-
-    @property
     def supported_interpolations(self) -> tuple[InterpolationMode, ...]:
         """Return the interpolation modes supported by the LUT.
 
@@ -491,7 +371,6 @@ class UnprojectLUT:
         *,
         grid_size_wh: tuple[int, int] | None = None,
         pixel_stride: float | tuple[float, float] | None = None,
-        storage_encoding: StorageEncoding = "float64_xy",
     ) -> UnprojectLUT:
         """Build a LUT from a camera model.
 
@@ -501,12 +380,10 @@ class UnprojectLUT:
                 the LUT uses a per-pixel grid.
             pixel_stride: Approximate pixel spacing between cached samples. Mutually
                 exclusive with ``grid_size_wh``.
-            storage_encoding: On-disk payload encoding to use when saving.
 
         Returns:
             A populated unprojection LUT.
         """
-        storage_encoding = _validate_storage_encoding(storage_encoding)
         if grid_size_wh is not None and pixel_stride is not None:
             raise ValueError("grid_size_wh and pixel_stride are mutually exclusive.")
 
@@ -530,13 +407,11 @@ class UnprojectLUT:
         y_coords = np.linspace(
             0.0, float(camera_model.image_height - 1), grid_height, dtype=np.float64
         )
-        payload_dtype = _SUPPORTED_ENCODINGS[storage_encoding]
 
         xy_grid = _sample_xy_grid_seeded(
             camera_model,
             x_coords=x_coords,
             y_coords=y_coords,
-            payload_dtype=payload_dtype,
         )
 
         lut = UnprojectLUT(
@@ -548,256 +423,71 @@ class UnprojectLUT:
             grid_x_max=float(camera_model.image_width - 1),
             grid_y_min=0.0,
             grid_y_max=float(camera_model.image_height - 1),
-            storage_encoding=storage_encoding,
             xy_grid=xy_grid,
         )
         return lut
 
-    def save(self, path: Path | str) -> None:
-        """Write the LUT to a `.unproject_LUT` file.
+    def save(self, dir_path: Path | str) -> None:
+        """Serialize the LUT to a directory.
+
+        Writes ``metadata.json`` with scalar parameters and ``xy_grid.npy``
+        with the raw float32 ray grid.
 
         Args:
-            path: Destination path. Must end with ``.unproject_LUT``.
-
-        Returns:
-            None.
+            dir_path: Destination directory (created if it doesn't exist).
         """
-        output_path = Path(path)
-        if output_path.suffix != ".unproject_LUT":
-            raise ValueError("UnprojectLUT files must use the .unproject_LUT suffix.")
+        p = Path(dir_path)
+        p.mkdir(parents=True, exist_ok=True)
 
-        header = self._encode_header().encode("ascii")
-        payload_dtype = _SUPPORTED_ENCODINGS[self.storage_encoding]
-        payload = np.asarray(self.xy_grid, dtype=payload_dtype, order="C").tobytes()
+        metadata = {
+            "lensboy-version": self.lensboy_version,
+            "image_width": self.image_width,
+            "image_height": self.image_height,
+            "grid_x_min": self.grid_x_min,
+            "grid_x_max": self.grid_x_max,
+            "grid_y_min": self.grid_y_min,
+            "grid_y_max": self.grid_y_max,
+        }
+        (p / _METADATA_FILENAME).write_text(json.dumps(metadata, indent=4))
 
-        with output_path.open("wb") as f:
-            f.write(header)
-            f.write(payload)
+        xy_grid = np.ascontiguousarray(self.xy_grid, dtype=_STORAGE_DTYPE)
+        np.save(p / _XY_GRID_FILENAME, xy_grid, allow_pickle=False)
 
     @staticmethod
-    def load(path: Path | str) -> UnprojectLUT:
-        """Load a LUT from disk.
+    def load(dir_path: Path | str) -> UnprojectLUT:
+        """Load a LUT from a directory written by :meth:`save`.
 
         Args:
-            path: Path to a `.unproject_LUT` file.
+            dir_path: Directory containing ``metadata.json`` and ``xy_grid.npy``.
 
         Returns:
-            The loaded LUT.
+            Reconstructed LUT.
         """
-        input_path = Path(path)
-        with input_path.open("rb") as f:
-            header_lines = UnprojectLUT._read_header_lines(f)
-            header = UnprojectLUT._parse_header_lines(header_lines)
-            payload_offset_bytes = f.tell()
-            payload = f.read()
+        p = Path(dir_path)
+        metadata = json.loads((p / _METADATA_FILENAME).read_text())
 
-        format_name = header["format"]
-        if format_name != _FORMAT_NAME:
-            raise ValueError(f"Unsupported LUT format {format_name!r}.")
-
-        format_version = int(header["format_version"])
-        if format_version != _FORMAT_VERSION:
+        version = metadata.get("lensboy-version")
+        if version is None or int(version.split(".")[0]) < 3:
             raise ValueError(
-                f"Unsupported LUT format_version {format_version}. "
-                f"Expected {_FORMAT_VERSION}."
-            )
-        UnprojectLUT._validate_header_fields(header)
-
-        storage_encoding = _validate_storage_encoding(header["storage_encoding"])
-        if header["payload_layout"] != _PAYLOAD_LAYOUT:
-            raise ValueError(f"Unsupported payload_layout {header['payload_layout']!r}.")
-        if header["payload_endianness"] != _PAYLOAD_ENDIANNESS:
-            raise ValueError(
-                f"Unsupported payload_endianness {header['payload_endianness']!r}."
-            )
-        declared_payload_offset_bytes = int(header["payload_offset_bytes"])
-        if payload_offset_bytes != declared_payload_offset_bytes:
-            raise ValueError(
-                f"Header payload_offset_bytes={declared_payload_offset_bytes}, "
-                f"but payload begins at byte offset {payload_offset_bytes}."
+                "This unproject LUT was created with an incompatible version of "
+                "lensboy (< 3.0.0). Please regenerate it with the current version."
             )
 
-        image_width, image_height = _parse_pair_of_ints(
-            header["image_size_wh"], "image_size_wh"
-        )
-        grid_width, grid_height = _parse_pair_of_ints(
-            header["grid_size_wh"], "grid_size_wh"
-        )
-        grid_x_min, grid_x_max, grid_y_min, grid_y_max = _parse_quad_of_floats(
-            header["grid_extents_xy"], "grid_extents_xy"
-        )
-        header_stride_x, header_stride_y = _parse_pair_of_floats(
-            header["grid_stride_xy"], "grid_stride_xy"
-        )
-        dtype = _SUPPORTED_ENCODINGS[storage_encoding]
-        expected_payload_bytes = grid_width * grid_height * 2 * dtype.itemsize
-        if len(payload) != expected_payload_bytes:
-            raise ValueError(
-                f"Unexpected payload size {len(payload)} bytes; expected "
-                f"{expected_payload_bytes}."
-            )
-        expected_stride_x = (
-            0.0 if grid_width <= 1 else (grid_x_max - grid_x_min) / (grid_width - 1)
-        )
-        expected_stride_y = (
-            0.0 if grid_height <= 1 else (grid_y_max - grid_y_min) / (grid_height - 1)
-        )
-        if not math.isclose(
-            header_stride_x, expected_stride_x, rel_tol=0.0, abs_tol=1e-12
-        ):
-            raise ValueError(
-                "grid_stride_xy does not match grid_extents_xy and grid_size_wh."
-            )
-        if not math.isclose(
-            header_stride_y, expected_stride_y, rel_tol=0.0, abs_tol=1e-12
-        ):
-            raise ValueError(
-                "grid_stride_xy does not match grid_extents_xy and grid_size_wh."
-            )
-
-        xy_grid = (
-            np.frombuffer(payload, dtype=dtype)
-            .astype(np.float64)
-            .reshape(grid_height, grid_width, 2)
-        )
+        xy_grid = np.load(p / _XY_GRID_FILENAME, allow_pickle=False).astype(np.float64)
+        grid_height, grid_width = xy_grid.shape[:2]
 
         return UnprojectLUT(
-            image_width=image_width,
-            image_height=image_height,
-            grid_width=grid_width,
-            grid_height=grid_height,
-            grid_x_min=grid_x_min,
-            grid_x_max=grid_x_max,
-            grid_y_min=grid_y_min,
-            grid_y_max=grid_y_max,
-            storage_encoding=storage_encoding,
+            image_width=int(metadata["image_width"]),
+            image_height=int(metadata["image_height"]),
+            grid_width=int(grid_width),
+            grid_height=int(grid_height),
+            grid_x_min=float(metadata["grid_x_min"]),
+            grid_x_max=float(metadata["grid_x_max"]),
+            grid_y_min=float(metadata["grid_y_min"]),
+            grid_y_max=float(metadata["grid_y_max"]),
             xy_grid=xy_grid,
-            default_interpolation=_validate_interpolation_mode(
-                header["default_interpolation"]
-            ),
-            default_bounds=_validate_bounds_mode(header["default_bounds"]),
-            lensboy_version=header["lensboy_version"],
+            lensboy_version=version,
         )
-
-    @staticmethod
-    def _read_header_lines(file_obj) -> list[str]:
-        header_lines: list[str] = []
-        total_bytes = 0
-        while True:
-            raw_line = file_obj.readline()
-            if raw_line == b"":
-                raise ValueError("Reached end of file before END_HEADER.")
-            total_bytes += len(raw_line)
-            if total_bytes > _MAX_HEADER_BYTES:
-                raise ValueError("Header exceeds the maximum supported size.")
-            try:
-                line = raw_line.decode("ascii").rstrip("\r\n")
-            except UnicodeDecodeError as exc:
-                raise ValueError("Header must contain only ASCII text.") from exc
-            if line == _HEADER_END_MARKER:
-                return header_lines
-            header_lines.append(line)
-
-    @staticmethod
-    def _parse_header_lines(header_lines: list[str]) -> dict[str, str]:
-        header: dict[str, str] = {}
-        for line in header_lines:
-            if ":" not in line:
-                raise ValueError(f"Invalid header line {line!r}. Expected 'key: value'.")
-            key, value = line.split(":", 1)
-            key = key.strip()
-            value = value.strip()
-            if not key:
-                raise ValueError("Header keys must be non-empty.")
-            if key in header:
-                raise ValueError(f"Duplicate header key {key!r}.")
-            header[key] = value
-        return header
-
-    @staticmethod
-    def _validate_header_fields(header: dict[str, str]) -> None:
-        required_fields = {
-            "format",
-            "format_version",
-            "lensboy_version",
-            "image_size_wh",
-            "grid_size_wh",
-            "grid_extents_xy",
-            "grid_stride_xy",
-            "storage_encoding",
-            "default_interpolation",
-            "default_bounds",
-            "payload_offset_bytes",
-            "payload_layout",
-            "payload_endianness",
-        }
-
-        missing = required_fields - set(header)
-        if missing:
-            missing_text = ", ".join(sorted(missing))
-            raise ValueError(f"Missing required header fields: {missing_text}.")
-
-        removed_fields = {
-            "error_report_mode",
-            "error_report_max_depth",
-            "error_report_min_cell_size",
-        }
-        removed_prefixes = (
-            "estimated_max_angular_error_",
-            "estimated_median_angular_error_",
-        )
-        unexpected_removed_fields = sorted(
-            key
-            for key in header
-            if key in removed_fields
-            or any(key.startswith(prefix) for prefix in removed_prefixes)
-        )
-        if unexpected_removed_fields:
-            removed_text = ", ".join(unexpected_removed_fields)
-            raise ValueError(
-                "This runtime-only .unproject_LUT format does not support "
-                f"legacy error-report header fields: {removed_text}."
-            )
-
-    def _encode_header(self) -> str:
-        stride_x, stride_y = self.grid_stride_xy
-
-        def build_lines(payload_offset_bytes_text: str) -> list[str]:
-            return [
-                f"format: {_FORMAT_NAME}",
-                f"payload_offset_bytes: {payload_offset_bytes_text}",
-                f"format_version: {_FORMAT_VERSION}",
-                f"lensboy_version: {self.lensboy_version}",
-                "image_size_wh: "
-                + _format_csv([str(self.image_width), str(self.image_height)]),
-                "grid_size_wh: "
-                + _format_csv([str(self.grid_width), str(self.grid_height)]),
-                "grid_extents_xy: "
-                + _format_csv(
-                    [
-                        _format_float(self.grid_x_min),
-                        _format_float(self.grid_x_max),
-                        _format_float(self.grid_y_min),
-                        _format_float(self.grid_y_max),
-                    ]
-                ),
-                "grid_stride_xy: "
-                + _format_csv([_format_float(stride_x), _format_float(stride_y)]),
-                f"storage_encoding: {self.storage_encoding}",
-                f"default_interpolation: {self.default_interpolation}",
-                f"default_bounds: {self.default_bounds}",
-                f"payload_layout: {_PAYLOAD_LAYOUT}",
-                f"payload_endianness: {_PAYLOAD_ENDIANNESS}",
-                _HEADER_END_MARKER,
-            ]
-
-        payload_offset_bytes_text = "0"
-        while True:
-            header = "\n".join(build_lines(payload_offset_bytes_text)) + "\n"
-            next_payload_offset_bytes_text = str(len(header.encode("ascii")))
-            if next_payload_offset_bytes_text == payload_offset_bytes_text:
-                return header
-            payload_offset_bytes_text = next_payload_offset_bytes_text
 
     def normalize_points(
         self,
