@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass, field
 from importlib.metadata import version as _package_version
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -14,35 +14,32 @@ if TYPE_CHECKING:
     from lensboy.camera_models.opencv import OpenCV
     from lensboy.camera_models.pinhole_splined import PinholeSplined
 
-InterpolationMode = Literal["nearest", "bilinear", "bicubic"]
-BoundsMode = Literal["strict", "clamp", "extrapolate"]
-
 _METADATA_FILENAME = "metadata.json"
 _XY_GRID_FILENAME = "xy_grid.npy"
 _STORAGE_DTYPE = np.dtype("<f4")
-_SUPPORTED_INTERPOLATIONS: tuple[InterpolationMode, ...] = (
+SUPPORTED_INTERPOLATIONS: tuple[str, ...] = (
     "nearest",
     "bilinear",
     "bicubic",
 )
-_SUPPORTED_BOUNDS: tuple[BoundsMode, ...] = ("strict", "clamp", "extrapolate")
+SUPPORTED_BOUNDS: tuple[str, ...] = ("strict", "clamp", "extrapolate")
 
 
-def _validate_interpolation_mode(interpolation: str) -> InterpolationMode:
-    if interpolation not in _SUPPORTED_INTERPOLATIONS:
+def _validate_interpolation_mode(interpolation: str) -> str:
+    if interpolation not in SUPPORTED_INTERPOLATIONS:
         raise ValueError(
             f"Unsupported interpolation mode {interpolation!r}. "
-            f"Expected one of {_SUPPORTED_INTERPOLATIONS}."
+            f"Expected one of {SUPPORTED_INTERPOLATIONS}."
         )
-    return interpolation  # type: ignore[return-value]
+    return interpolation
 
 
-def _validate_bounds_mode(bounds: str) -> BoundsMode:
-    if bounds not in _SUPPORTED_BOUNDS:
+def _validate_bounds_mode(bounds: str) -> str:
+    if bounds not in SUPPORTED_BOUNDS:
         raise ValueError(
-            f"Unsupported bounds mode {bounds!r}. Expected one of {_SUPPORTED_BOUNDS}."
+            f"Unsupported bounds mode {bounds!r}. Expected one of {SUPPORTED_BOUNDS}."
         )
-    return bounds  # type: ignore[return-value]
+    return bounds
 
 
 def _catmull_rom_weights(t: np.ndarray) -> np.ndarray:
@@ -342,22 +339,24 @@ class UnprojectLUT:
         return float(stride_x), float(stride_y)
 
     @property
-    def supported_interpolations(self) -> tuple[InterpolationMode, ...]:
+    def supported_interpolations(self) -> tuple[str, ...]:
         """Return the interpolation modes supported by the LUT.
 
         Returns:
-            Tuple of interpolation mode names.
+            Tuple of interpolation mode names: ``"nearest"``, ``"bilinear"``,
+            ``"bicubic"``.
         """
-        return _SUPPORTED_INTERPOLATIONS
+        return SUPPORTED_INTERPOLATIONS
 
     @property
-    def supported_bounds(self) -> tuple[BoundsMode, ...]:
+    def supported_bounds(self) -> tuple[str, ...]:
         """Return the bounds behaviors supported by the LUT.
 
         Returns:
-            Tuple of bounds mode names.
+            Tuple of bounds mode names: ``"strict"``, ``"clamp"``,
+            ``"extrapolate"``.
         """
-        return _SUPPORTED_BOUNDS
+        return SUPPORTED_BOUNDS
 
     @staticmethod
     def _compute_grid_scale(size: int, minimum: float, maximum: float) -> float:
@@ -493,16 +492,20 @@ class UnprojectLUT:
         self,
         pixel_coords: np.ndarray,
         *,
-        interpolation: InterpolationMode = "bilinear",
-        bounds: BoundsMode = "strict",
+        interpolation: str = "bilinear",
+        bounds: str = "strict",
         return_valid_mask: bool = False,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
         """Query the LUT for camera-frame rays.
 
         Args:
             pixel_coords: Pixel coordinates with shape ``(N, 2)``.
-            interpolation: Interpolation mode to use.
-            bounds: Bounds behavior for out-of-domain pixels.
+            interpolation: Interpolation mode to use. One of ``"nearest"``,
+                ``"bilinear"``, ``"bicubic"``.
+            bounds: Bounds behavior for out-of-domain pixels. One of
+                ``"strict"`` (raise unless ``return_valid_mask`` is set),
+                ``"clamp"`` (snap queries onto the LUT domain), or
+                ``"extrapolate"`` (extend the interpolant past the domain).
             return_valid_mask: Whether to also return a boolean validity mask.
 
         Returns:
@@ -562,8 +565,8 @@ class UnprojectLUT:
         self,
         x: np.ndarray,
         y: np.ndarray,
-        interpolation: InterpolationMode,
-        bounds: BoundsMode,
+        interpolation: str,
+        bounds: str,
     ) -> np.ndarray:
         if len(x) == 0:
             return np.empty((0, 2), dtype=np.float64)
@@ -586,7 +589,7 @@ class UnprojectLUT:
         self,
         gx: np.ndarray,
         gy: np.ndarray,
-        bounds: BoundsMode,
+        bounds: str,
     ) -> np.ndarray:
         ix0, tx = self._linear_indices_and_weights(gx, self.grid_width, bounds)
         iy0, ty = self._linear_indices_and_weights(gy, self.grid_height, bounds)
@@ -609,7 +612,7 @@ class UnprojectLUT:
         self,
         gx: np.ndarray,
         gy: np.ndarray,
-        bounds: BoundsMode,
+        bounds: str,
     ) -> np.ndarray:
         bilinear_xy = self._query_bilinear(gx, gy, bounds)
         if self.grid_width < 4 or self.grid_height < 4:
@@ -669,7 +672,7 @@ class UnprojectLUT:
     def _linear_indices_and_weights(
         g: np.ndarray,
         size: int,
-        bounds: BoundsMode,
+        bounds: str,
     ) -> tuple[np.ndarray, np.ndarray]:
         if size == 1:
             return np.zeros(len(g), dtype=np.int64), np.zeros(len(g), dtype=np.float64)

@@ -1,20 +1,20 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from lensboy.camera_models.unproject_lut import InterpolationMode, UnprojectLUT
+from lensboy.camera_models.unproject_lut import UnprojectLUT
 
 if TYPE_CHECKING:
     from lensboy.camera_models.base_model import CameraModel
 
 _NormalizePointsFn = Callable[[np.ndarray], np.ndarray]
 
-_SUPPORTED_INTERPOLATIONS: tuple[InterpolationMode, ...] = (
+_SUPPORTED_INTERPOLATIONS: tuple[str, ...] = (
     "nearest",
     "bilinear",
     "bicubic",
@@ -31,13 +31,13 @@ def _validate_target_sample_count(target_sample_count: int) -> int:
     return resolved
 
 
-def _validate_interpolation_mode(interpolation: str) -> InterpolationMode:
+def _validate_interpolation_mode(interpolation: str) -> str:
     if interpolation not in _SUPPORTED_INTERPOLATIONS:
         raise ValueError(
             f"Unsupported interpolation mode {interpolation!r}. "
             f"Expected one of {_SUPPORTED_INTERPOLATIONS}."
         )
-    return interpolation  # type: ignore[return-value]
+    return interpolation
 
 
 def _validate_error_mode(mode: str) -> str:
@@ -47,16 +47,14 @@ def _validate_error_mode(mode: str) -> str:
 
 
 def _normalize_interpolations(
-    interpolations: InterpolationMode
-    | tuple[InterpolationMode, ...]
-    | list[InterpolationMode],
-) -> tuple[InterpolationMode, ...]:
+    interpolations: str | Sequence[str],
+) -> tuple[str, ...]:
     if isinstance(interpolations, str):
         raw_items = [interpolations]
     else:
         raw_items = list(interpolations)
 
-    normalized: list[InterpolationMode] = []
+    normalized: list[str] = []
     seen: set[str] = set()
     for item in raw_items:
         mode = _validate_interpolation_mode(item)
@@ -174,7 +172,7 @@ def _estimate_cells_error_detail_batch(
     lut: UnprojectLUT,
     normalize_points_fn: Callable[[np.ndarray], np.ndarray],
     *,
-    mode: InterpolationMode,
+    mode: str,
     x0: np.ndarray,
     x1: np.ndarray,
     y0: np.ndarray,
@@ -223,7 +221,7 @@ def _estimate_cell_error_detail(
     lut: UnprojectLUT,
     normalize_points_fn: Callable[[np.ndarray], np.ndarray],
     *,
-    mode: InterpolationMode,
+    mode: str,
     x0: float,
     x1: float,
     y0: float,
@@ -295,7 +293,7 @@ def _estimate_adaptive_errors_for_cell_chunk(
     lut: UnprojectLUT,
     normalize_points_fn: Callable[[np.ndarray], np.ndarray],
     *,
-    mode: InterpolationMode,
+    mode: str,
     x0: np.ndarray,
     x1: np.ndarray,
     y0: np.ndarray,
@@ -359,10 +357,12 @@ class UnprojectLUTAccuracyReport:
     """Accuracy summary for one or more LUT interpolation modes.
 
     Args:
-        interpolations: Interpolation modes included in the report.
+        interpolations: Interpolation modes included in the report. Each entry
+            is one of ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
         max_angular_error_mdeg: Observed maximum angular error per interpolation mode.
         median_angular_error_mdeg: Observed median angular error per interpolation mode.
-        mode: Error-estimation mode used to build the report.
+        mode: Error-estimation mode used to build the report. Only
+            ``"adaptive"`` is supported.
         max_depth: Maximum adaptive subdivision depth.
         min_cell_size: Minimum subcell size in pixels.
 
@@ -370,7 +370,7 @@ class UnprojectLUTAccuracyReport:
         Immutable report describing the requested interpolation modes.
     """
 
-    interpolations: tuple[InterpolationMode, ...]
+    interpolations: tuple[str, ...]
     max_angular_error_mdeg: dict[str, float]
     median_angular_error_mdeg: dict[str, float]
     mode: str
@@ -383,7 +383,8 @@ class UnprojectLUTSampleAccuracy:
     """Dense sampled comparison between a LUT and its exact source model.
 
     Args:
-        interpolation: Interpolation mode used to query the LUT.
+        interpolation: Interpolation mode used to query the LUT. One of
+            ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
         target_sample_count: Requested approximate number of sample pixels.
         sample_grid_width: Sample-grid width.
         sample_grid_height: Sample-grid height.
@@ -396,7 +397,7 @@ class UnprojectLUTSampleAccuracy:
         In-memory sampled comparison result for one interpolation mode.
     """
 
-    interpolation: InterpolationMode
+    interpolation: str
     target_sample_count: int
     sample_grid_width: int
     sample_grid_height: int
@@ -483,7 +484,8 @@ class UnprojectLUTErrorHeatmap:
     """Per-cell angular-error heatmap for a LUT interpolation mode.
 
     Args:
-        interpolation: Interpolation mode represented by the heatmap.
+        interpolation: Interpolation mode represented by the heatmap. One of
+            ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
         max_depth: Maximum adaptive subdivision depth.
         min_cell_size: Minimum subcell size in pixels.
         cell_x_edges: Cell x edges, shape ``(grid_width,)``
@@ -501,7 +503,7 @@ class UnprojectLUTErrorHeatmap:
         In-memory representation of a saved or computed heatmap.
     """
 
-    interpolation: InterpolationMode
+    interpolation: str
     max_depth: int
     min_cell_size: float
     cell_x_edges: np.ndarray
@@ -582,9 +584,8 @@ class UnprojectLUTErrorHeatmap:
         """
         with np.load(Path(path)) as heatmap_data:
             return UnprojectLUTErrorHeatmap(
-                interpolation=cast(
-                    InterpolationMode,
-                    str(np.asarray(heatmap_data["interpolation"]).item()),
+                interpolation=str(
+                    np.asarray(heatmap_data["interpolation"]).item()
                 ),
                 max_depth=int(np.asarray(heatmap_data["max_depth"]).item()),
                 min_cell_size=float(np.asarray(heatmap_data["min_cell_size"]).item()),
@@ -607,9 +608,7 @@ def estimate_lut_accuracy(
     lut: UnprojectLUT,
     model: CameraModel,
     *,
-    interpolations: InterpolationMode
-    | tuple[InterpolationMode, ...]
-    | list[InterpolationMode] = "bilinear",
+    interpolations: str | Sequence[str] = "bilinear",
     mode: str = "adaptive",
     max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
     min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
@@ -619,7 +618,9 @@ def estimate_lut_accuracy(
     Args:
         lut: Runtime LUT to analyze.
         model: The exact camera model the LUT was built from.
-        interpolations: Interpolation modes to include in the report.
+        interpolations: Interpolation modes to include in the report. Each
+            entry must be one of ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
+            Pass a single string or a sequence of strings.
         mode: Error-estimation mode. Only ``"adaptive"`` is supported.
         max_depth: Maximum adaptive subdivision depth.
         min_cell_size: Minimum subcell size in pixels.
@@ -650,7 +651,7 @@ def compute_lut_error_heatmap(
     lut: UnprojectLUT,
     model: CameraModel,
     *,
-    interpolation: InterpolationMode = "bilinear",
+    interpolation: str = "bilinear",
     mode: str = "adaptive",
     max_depth: int = _DEFAULT_ERROR_MAX_DEPTH,
     min_cell_size: float = _DEFAULT_ERROR_MIN_CELL_SIZE,
@@ -660,7 +661,8 @@ def compute_lut_error_heatmap(
     Args:
         lut: Runtime LUT to analyze.
         model: The exact camera model the LUT was built from.
-        interpolation: Interpolation mode to evaluate.
+        interpolation: Interpolation mode to evaluate. One of ``"nearest"``,
+            ``"bilinear"``, ``"bicubic"``.
         mode: Error-estimation mode. Only ``"adaptive"`` is supported.
         max_depth: Maximum adaptive subdivision depth.
         min_cell_size: Minimum subcell size in pixels.
@@ -727,7 +729,7 @@ def sample_lut_accuracy(
     lut: UnprojectLUT,
     model: CameraModel,
     *,
-    interpolation: InterpolationMode = "bilinear",
+    interpolation: str = "bilinear",
     target_sample_count: int = 2500,
 ) -> UnprojectLUTSampleAccuracy:
     """Sample LUT accuracy on an evenly spaced image grid.
@@ -735,7 +737,8 @@ def sample_lut_accuracy(
     Args:
         lut: Runtime LUT to analyze.
         model: The exact camera model the LUT was built from.
-        interpolation: Interpolation mode to evaluate.
+        interpolation: Interpolation mode to evaluate. One of ``"nearest"``,
+            ``"bilinear"``, ``"bicubic"``.
         target_sample_count: Approximate number of evenly spaced sample pixels.
 
     Returns:
@@ -781,7 +784,7 @@ def _estimate_adaptive_errors(
     lut: UnprojectLUT,
     normalize_points_fn: _NormalizePointsFn,
     *,
-    interpolations: tuple[InterpolationMode, ...],
+    interpolations: tuple[str, ...],
     max_depth: int,
     min_cell_size: float,
 ) -> tuple[dict[str, float], dict[str, float]]:
