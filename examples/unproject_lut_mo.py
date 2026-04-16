@@ -299,20 +299,18 @@ def _(loaded, model, controls, interpolation_mode, output_dir):
 
 
 @app.cell(hide_code=True)
-def _(bounds_demo_pixels, clamp_rays, strict_rays, valid_mask):
+def _(bounds_demo_pixels, bounds_demo_rays, bounds_demo_valid_mask):
     mo.md(f"""
-    ## Bounds behavior
+    ## Out-of-bounds behavior
 
-    `strict` keeps queries safe by flagging pixels outside the LUT domain.
+    Out-of-domain pixels get NaN rays and False in the valid mask.
 
     - demo pixels:
       `{np.array2string(bounds_demo_pixels, precision=2, separator=", ")}`
-    - strict valid mask:
-      `{np.array2string(valid_mask, separator=", ")}`
-    - first strict ray:
-      `{np.array2string(strict_rays[0], precision=5, separator=", ")}`
-    - first clamped ray:
-      `{np.array2string(clamp_rays[0], precision=5, separator=", ")}`
+    - valid mask:
+      `{np.array2string(bounds_demo_valid_mask, separator=", ")}`
+    - first valid ray:
+      `{np.array2string(bounds_demo_rays[1], precision=5, separator=", ")}`
     """)
     return
 
@@ -327,13 +325,10 @@ def _(loaded, model):
             [model.image_width + 20.0, model.image_height / 2.0],
         ]
     )
-    strict_rays, valid_mask = loaded.normalize_points(
+    bounds_demo_rays, bounds_demo_valid_mask = loaded.normalize_points(
         bounds_demo_pixels,
-        bounds="strict",
-        return_valid_mask=True,
     )
-    clamp_rays = loaded.normalize_points(bounds_demo_pixels, bounds="clamp")
-    return bounds_demo_pixels, clamp_rays, strict_rays, valid_mask
+    return bounds_demo_pixels, bounds_demo_rays, bounds_demo_valid_mask
 
 
 @app.cell(hide_code=True)
@@ -352,8 +347,7 @@ def _():
     auto result = lut.query(
         1280.0,
         720.0,
-        lensboy::InterpolationMode::kBilinear,
-        lensboy::BoundsMode::kStrict
+        lensboy::InterpolationMode::kBilinear
     );
 
     if (result.valid) {

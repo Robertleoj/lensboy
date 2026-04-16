@@ -107,10 +107,9 @@ lut = model.get_unproject_lut(
 lut.save("camera.unproject_LUT")
 
 runtime_lut = lb.UnprojectLUT.load("camera.unproject_LUT")
-rays = runtime_lut.normalize_points(
+rays, valid_mask = runtime_lut.normalize_points(
     pixel_coords,
     interpolation="bilinear",
-    bounds="strict",
 )
 
 report = estimate_lut_accuracy(runtime_lut, model, interpolations="bilinear")

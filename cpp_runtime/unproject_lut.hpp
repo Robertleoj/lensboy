@@ -13,12 +13,6 @@ enum class InterpolationMode {
     kBicubic,
 };
 
-enum class BoundsMode {
-    kStrict,
-    kClamp,
-    kExtrapolate,
-};
-
 struct PixelXY {
     double xy[2] = {0.0, 0.0};
 };
@@ -55,14 +49,12 @@ class UnprojectLUT {
         double pixel_x,
         double pixel_y,
         InterpolationMode interpolation = InterpolationMode::kBilinear,
-        BoundsMode bounds = BoundsMode::kStrict,
         bool normalize = true
     ) const;
 
     std::vector<UnprojectLUTQueryResult> query(
         std::vector<PixelXY> const& pixels,
         InterpolationMode interpolation = InterpolationMode::kBilinear,
-        BoundsMode bounds = BoundsMode::kStrict,
         bool normalize = true
     ) const;
 

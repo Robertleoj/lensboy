@@ -241,7 +241,6 @@ UnprojectLUTQueryResult UnprojectLUT::query(
     double pixel_x,
     double pixel_y,
     InterpolationMode interpolation,
-    BoundsMode bounds,
     bool const normalize
 ) const {
     bool const inside = pixel_x >= metadata_.grid_x_min and
@@ -249,37 +248,27 @@ UnprojectLUTQueryResult UnprojectLUT::query(
                         pixel_y >= metadata_.grid_y_min and
                         pixel_y <= metadata_.grid_y_max;
 
-    if (bounds == BoundsMode::kStrict and not inside) {
+    if (not inside) {
         return invalid_result();
     }
 
-    double sample_x = pixel_x;
-    double sample_y = pixel_y;
-    if (bounds == BoundsMode::kClamp) {
-        sample_x = std::clamp(sample_x, metadata_.grid_x_min, metadata_.grid_x_max);
-        sample_y = std::clamp(sample_y, metadata_.grid_y_min, metadata_.grid_y_max);
-    }
-
-    double const gx = grid_coordinate_x(sample_x);
-    double const gy = grid_coordinate_y(sample_y);
+    double const gx = grid_coordinate_x(pixel_x);
+    double const gy = grid_coordinate_y(pixel_y);
 
     PixelXY xy = {{quiet_nan(), quiet_nan()}};
 
-    auto const bilinear_xy = [this, gx, gy, bounds]() -> PixelXY {
+    auto const bilinear_xy = [this, gx, gy]() -> PixelXY {
         long long ix0 = 0;
         long long iy0 = 0;
         double tx = 0.0;
         double ty = 0.0;
 
         if (metadata_.grid_width > 1) {
-            double gx_work = gx;
-            if (bounds != BoundsMode::kExtrapolate) {
-                gx_work = std::clamp(
-                    gx_work,
-                    0.0,
-                    static_cast<double>(metadata_.grid_width - 1)
-                );
-            }
+            double const gx_work = std::clamp(
+                gx,
+                0.0,
+                static_cast<double>(metadata_.grid_width - 1)
+            );
             ix0 = static_cast<long long>(std::floor(gx_work));
             ix0 = std::clamp<long long>(
                 ix0,
@@ -290,14 +279,11 @@ UnprojectLUTQueryResult UnprojectLUT::query(
         }
 
         if (metadata_.grid_height > 1) {
-            double gy_work = gy;
-            if (bounds != BoundsMode::kExtrapolate) {
-                gy_work = std::clamp(
-                    gy_work,
-                    0.0,
-                    static_cast<double>(metadata_.grid_height - 1)
-                );
-            }
+            double const gy_work = std::clamp(
+                gy,
+                0.0,
+                static_cast<double>(metadata_.grid_height - 1)
+            );
             iy0 = static_cast<long long>(std::floor(gy_work));
             iy0 = std::clamp<long long>(
                 iy0,
@@ -353,12 +339,10 @@ UnprojectLUTQueryResult UnprojectLUT::query(
         if (metadata_.grid_width < 4 or metadata_.grid_height < 4) {
             xy = bilinear_xy();
         } else {
-            double const gx_work = bounds == BoundsMode::kExtrapolate
-                ? gx
-                : std::clamp(gx, 0.0, static_cast<double>(metadata_.grid_width - 1));
-            double const gy_work = bounds == BoundsMode::kExtrapolate
-                ? gy
-                : std::clamp(gy, 0.0, static_cast<double>(metadata_.grid_height - 1));
+            double const gx_work =
+                std::clamp(gx, 0.0, static_cast<double>(metadata_.grid_width - 1));
+            double const gy_work =
+                std::clamp(gy, 0.0, static_cast<double>(metadata_.grid_height - 1));
 
             long long const anchor_x = static_cast<long long>(std::floor(gx_work));
             long long const anchor_y = static_cast<long long>(std::floor(gy_work));
@@ -416,14 +400,13 @@ UnprojectLUTQueryResult UnprojectLUT::query(
 std::vector<UnprojectLUTQueryResult> UnprojectLUT::query(
     std::vector<PixelXY> const& pixels,
     InterpolationMode interpolation,
-    BoundsMode bounds,
     bool const normalize
 ) const {
     std::vector<UnprojectLUTQueryResult> results;
     results.reserve(pixels.size());
     for (PixelXY const& pixel : pixels) {
         results.push_back(
-            query(pixel.xy[0], pixel.xy[1], interpolation, bounds, normalize)
+            query(pixel.xy[0], pixel.xy[1], interpolation, normalize)
         );
     }
     return results;

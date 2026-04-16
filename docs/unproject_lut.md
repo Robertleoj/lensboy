@@ -37,26 +37,19 @@ The LUT stores only `x` and `y`. The queried ray is always reconstructed as `[x,
 ```python
 runtime_lut = lb.UnprojectLUT.load("camera.unproject_LUT")
 
-rays = runtime_lut.normalize_points(
+rays, valid_mask = runtime_lut.normalize_points(
     pixel_coords,
     interpolation="bilinear",
-    bounds="strict",
 )
 ```
 
-Supported runtime interpolation modes:
+Out-of-domain pixels get NaN rays and `False` in `valid_mask`.
+
+Supported interpolation modes:
 
 - `nearest`
-- `bilinear`
+- `bilinear` (default)
 - `bicubic`
-
-Supported bounds modes:
-
-- `strict`
-- `clamp`
-- `extrapolate`
-
-`bilinear` is the default. `strict` is the default bounds behavior.
 
 ## Analyze accuracy later
 
@@ -139,8 +132,7 @@ auto lut = lensboy::UnprojectLUT::load("camera_lut/");
 auto result = lut.query(
     1280.0,
     720.0,
-    lensboy::InterpolationMode::kBilinear,
-    lensboy::BoundsMode::kStrict
+    lensboy::InterpolationMode::kBilinear
 );
 
 if (result.valid) {

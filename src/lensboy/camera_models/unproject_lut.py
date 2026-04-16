@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
+from lensboy import lensboy_bindings as lbb
 from importlib.metadata import version as _package_version
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,7 +23,6 @@ SUPPORTED_INTERPOLATIONS: tuple[str, ...] = (
     "bilinear",
     "bicubic",
 )
-SUPPORTED_BOUNDS: tuple[str, ...] = ("strict", "clamp", "extrapolate")
 
 
 def _validate_interpolation_mode(interpolation: str) -> str:
@@ -32,14 +32,6 @@ def _validate_interpolation_mode(interpolation: str) -> str:
             f"Expected one of {SUPPORTED_INTERPOLATIONS}."
         )
     return interpolation
-
-
-def _validate_bounds_mode(bounds: str) -> str:
-    if bounds not in SUPPORTED_BOUNDS:
-        raise ValueError(
-            f"Unsupported bounds mode {bounds!r}. Expected one of {SUPPORTED_BOUNDS}."
-        )
-    return bounds
 
 
 def _catmull_rom_weights(t: np.ndarray) -> np.ndarray:
@@ -165,7 +157,8 @@ def _sample_xy_grid_seeded(
     Returns:
         Sampled xy grid, shape ``(grid_height, grid_width, 2)``.
     """
-    from lensboy import lensboy_bindings as lbb
+    from lensboy.camera_models.opencv import OpenCV
+    from lensboy.camera_models.pinhole_splined import PinholeSplined
 
     grid_width = len(x_coords)
     grid_height = len(y_coords)
@@ -177,9 +170,6 @@ def _sample_xy_grid_seeded(
     )
 
     seed_pixels, seed_normals, seed_w, seed_h = _compute_seed_grid(camera_model)  # type: ignore[arg-type]
-
-    from lensboy.camera_models.opencv import OpenCV
-    from lensboy.camera_models.pinhole_splined import PinholeSplined
 
     if isinstance(camera_model, OpenCV):
         dist = np.asarray(camera_model.distortion_coeffs, dtype=np.float64)
@@ -234,6 +224,12 @@ def _grid_size_from_stride(image_size: int, stride: float) -> int:
     if image_size <= 1:
         return 1
     return int(math.ceil((image_size - 1) / stride)) + 1
+
+
+def _compute_grid_scale(size: int, minimum: float, maximum: float) -> float:
+    if size == 1 or maximum == minimum:
+        return 0.0
+    return (size - 1) / (maximum - minimum)
 
 
 @dataclass
@@ -291,10 +287,10 @@ class UnprojectLUT:
             raise ValueError("xy_grid must contain only finite values.")
         self.xy_grid = np.ascontiguousarray(grid)
 
-        self._grid_scale_x = self._compute_grid_scale(
+        self._grid_scale_x = _compute_grid_scale(
             self.grid_width, self.grid_x_min, self.grid_x_max
         )
-        self._grid_scale_y = self._compute_grid_scale(
+        self._grid_scale_y = _compute_grid_scale(
             self.grid_height, self.grid_y_min, self.grid_y_max
         )
 
@@ -337,32 +333,6 @@ class UnprojectLUT:
         if self.grid_height > 1:
             stride_y = (self.grid_y_max - self.grid_y_min) / (self.grid_height - 1)
         return float(stride_x), float(stride_y)
-
-    @property
-    def supported_interpolations(self) -> tuple[str, ...]:
-        """Return the interpolation modes supported by the LUT.
-
-        Returns:
-            Tuple of interpolation mode names: ``"nearest"``, ``"bilinear"``,
-            ``"bicubic"``.
-        """
-        return SUPPORTED_INTERPOLATIONS
-
-    @property
-    def supported_bounds(self) -> tuple[str, ...]:
-        """Return the bounds behaviors supported by the LUT.
-
-        Returns:
-            Tuple of bounds mode names: ``"strict"``, ``"clamp"``,
-            ``"extrapolate"``.
-        """
-        return SUPPORTED_BOUNDS
-
-    @staticmethod
-    def _compute_grid_scale(size: int, minimum: float, maximum: float) -> float:
-        if size == 1 or maximum == minimum:
-            return 0.0
-        return (size - 1) / (maximum - minimum)
 
     @staticmethod
     def from_camera_model(
@@ -493,28 +463,21 @@ class UnprojectLUT:
         pixel_coords: np.ndarray,
         *,
         interpolation: str = "bilinear",
-        bounds: str = "strict",
-        return_valid_mask: bool = False,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Query the LUT for camera-frame rays.
+
+        Out-of-domain pixels get NaN for x/y and False in the valid mask.
 
         Args:
             pixel_coords: Pixel coordinates with shape ``(N, 2)``.
-            interpolation: Interpolation mode to use. One of ``"nearest"``,
+            interpolation: Interpolation mode. One of ``"nearest"``,
                 ``"bilinear"``, ``"bicubic"``.
-            bounds: Bounds behavior for out-of-domain pixels. One of
-                ``"strict"`` (raise unless ``return_valid_mask`` is set),
-                ``"clamp"`` (snap queries onto the LUT domain), or
-                ``"extrapolate"`` (extend the interpolant past the domain).
-            return_valid_mask: Whether to also return a boolean validity mask.
 
         Returns:
-            Rays with shape ``(N, 3)``.
-            If ``return_valid_mask`` is True, also returns a boolean mask with
-            shape ``(N,)`` indicating which rows were valid in strict mode.
+            Tuple of (rays, valid_mask) where rays has shape ``(N, 3)`` and
+            valid_mask has shape ``(N,)``.
         """
         interpolation = _validate_interpolation_mode(interpolation)
-        bounds = _validate_bounds_mode(bounds)
 
         pts = np.asarray(pixel_coords, dtype=np.float64)
         if pts.ndim != 2 or pts.shape[1] != 2:
@@ -524,34 +487,16 @@ class UnprojectLUT:
         query_y = pts[:, 1]
         valid_mask = self._valid_mask(query_x, query_y)
 
-        if bounds == "strict" and not return_valid_mask and not np.all(valid_mask):
-            raise ValueError("Some pixel coordinates lie outside the LUT domain.")
-
         rays = np.full((len(pts), 3), np.nan, dtype=np.float64)
         rays[:, 2] = 1.0
 
-        if bounds == "strict":
-            active_mask = valid_mask
-            sample_x = query_x[active_mask]
-            sample_y = query_y[active_mask]
-        elif bounds == "clamp":
-            active_mask = np.ones(len(pts), dtype=bool)
-            sample_x = np.clip(query_x, self.grid_x_min, self.grid_x_max)
-            sample_y = np.clip(query_y, self.grid_y_min, self.grid_y_max)
-            valid_mask = np.ones(len(pts), dtype=bool)
-        else:
-            active_mask = np.ones(len(pts), dtype=bool)
-            sample_x = query_x
-            sample_y = query_y
-            valid_mask = np.ones(len(pts), dtype=bool)
+        if np.any(valid_mask):
+            approx_xy = self._interpolate_xy(
+                query_x[valid_mask], query_y[valid_mask], interpolation
+            )
+            rays[valid_mask, :2] = approx_xy
 
-        if np.any(active_mask):
-            approx_xy = self._interpolate_xy(sample_x, sample_y, interpolation, bounds)
-            rays[active_mask, :2] = approx_xy
-
-        if return_valid_mask:
-            return rays, valid_mask
-        return rays
+        return rays, valid_mask
 
     def _valid_mask(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         return (
@@ -566,7 +511,6 @@ class UnprojectLUT:
         x: np.ndarray,
         y: np.ndarray,
         interpolation: str,
-        bounds: str,
     ) -> np.ndarray:
         if len(x) == 0:
             return np.empty((0, 2), dtype=np.float64)
@@ -577,8 +521,8 @@ class UnprojectLUT:
         if interpolation == "nearest":
             return self._query_nearest(gx, gy)
         if interpolation == "bilinear":
-            return self._query_bilinear(gx, gy, bounds)
-        return self._query_bicubic(gx, gy, bounds)
+            return self._query_bilinear(gx, gy)
+        return self._query_bicubic(gx, gy)
 
     def _query_nearest(self, gx: np.ndarray, gy: np.ndarray) -> np.ndarray:
         ix = np.clip(np.rint(gx).astype(np.int64), 0, self.grid_width - 1)
@@ -589,10 +533,9 @@ class UnprojectLUT:
         self,
         gx: np.ndarray,
         gy: np.ndarray,
-        bounds: str,
     ) -> np.ndarray:
-        ix0, tx = self._linear_indices_and_weights(gx, self.grid_width, bounds)
-        iy0, ty = self._linear_indices_and_weights(gy, self.grid_height, bounds)
+        ix0, tx = self._linear_indices_and_weights(gx, self.grid_width)
+        iy0, ty = self._linear_indices_and_weights(gy, self.grid_height)
 
         ix1 = np.clip(ix0 + 1, 0, self.grid_width - 1)
         iy1 = np.clip(iy0 + 1, 0, self.grid_height - 1)
@@ -612,18 +555,13 @@ class UnprojectLUT:
         self,
         gx: np.ndarray,
         gy: np.ndarray,
-        bounds: str,
     ) -> np.ndarray:
-        bilinear_xy = self._query_bilinear(gx, gy, bounds)
+        bilinear_xy = self._query_bilinear(gx, gy)
         if self.grid_width < 4 or self.grid_height < 4:
             return bilinear_xy
 
-        if bounds == "extrapolate":
-            gx_work = gx
-            gy_work = gy
-        else:
-            gx_work = np.clip(gx, 0.0, self.grid_width - 1.0)
-            gy_work = np.clip(gy, 0.0, self.grid_height - 1.0)
+        gx_work = np.clip(gx, 0.0, self.grid_width - 1.0)
+        gy_work = np.clip(gy, 0.0, self.grid_height - 1.0)
 
         ix1 = np.floor(gx_work).astype(np.int64)
         iy1 = np.floor(gy_work).astype(np.int64)
@@ -672,19 +610,13 @@ class UnprojectLUT:
     def _linear_indices_and_weights(
         g: np.ndarray,
         size: int,
-        bounds: str,
     ) -> tuple[np.ndarray, np.ndarray]:
         if size == 1:
             return np.zeros(len(g), dtype=np.int64), np.zeros(len(g), dtype=np.float64)
 
-        if bounds == "extrapolate":
-            base = np.floor(g).astype(np.int64)
-            base = np.clip(base, 0, size - 2)
-            t = g - base
-        else:
-            g_clipped = np.clip(g, 0.0, size - 1.0)
-            base = np.floor(g_clipped).astype(np.int64)
-            base = np.minimum(base, size - 2)
-            t = g_clipped - base
+        g_clipped = np.clip(g, 0.0, size - 1.0)
+        base = np.floor(g_clipped).astype(np.int64)
+        base = np.minimum(base, size - 2)
+        t = g_clipped - base
 
         return base, t

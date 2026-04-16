@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -186,7 +186,6 @@ def _estimate_cells_error_detail_batch(
         flat_points[:, 0],
         flat_points[:, 1],
         mode,
-        "strict",
     )
     errors = _angular_error_deg_from_xy(exact_xy, approx_xy).reshape(len(x0), 9)
     error_delta_xy = (approx_xy - exact_xy).reshape(len(x0), 9, 2)
@@ -238,7 +237,6 @@ def _estimate_cell_error_detail(
         sample_points[:, 0],
         sample_points[:, 1],
         mode,
-        "strict",
     )
     errors = _angular_error_deg_from_xy(exact_xy, approx_xy)
     sampled_errors_deg.extend(errors.tolist())
@@ -756,13 +754,9 @@ def sample_lut_accuracy(
         target_sample_count=target_sample_count,
     )
     exact_rays = model.normalize_points(sample_pixels)
-    approx_rays = cast(
-        np.ndarray,
-        lut.normalize_points(
-            sample_pixels,
-            interpolation=interpolation,
-            bounds="strict",
-        ),
+    approx_rays, _ = lut.normalize_points(
+        sample_pixels,
+        interpolation=interpolation,
     )
     angular_error_deg = _angular_error_deg_from_xy(
         np.asarray(exact_rays[:, :2], dtype=np.float64),

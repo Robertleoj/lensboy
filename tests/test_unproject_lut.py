@@ -106,7 +106,7 @@ def test_unproject_lut_round_trip_for_camera_models(
     pixels = np.column_stack([grid_x.ravel(), grid_y.ravel()])
 
     expected = model.normalize_points(pixels)
-    actual = loaded.normalize_points(pixels, interpolation="bilinear")
+    actual, _ = loaded.normalize_points(pixels, interpolation="bilinear")
     np.testing.assert_allclose(actual, expected, atol=1e-5)
 
 
@@ -121,8 +121,7 @@ def test_linear_pinhole_lut_round_trips_through_float32(tmp_path: Path) -> None:
     lut.save(dir_path)
     loaded = lb.UnprojectLUT.load(dir_path)
 
-    approx = loaded.normalize_points(sample_pixels, interpolation="bilinear")
-    assert isinstance(approx, np.ndarray)
+    approx, _ = loaded.normalize_points(sample_pixels, interpolation="bilinear")
     max_abs_error = float(np.max(np.abs(approx[:, :2] - expected[:, :2])))
     assert max_abs_error < 1e-6
 
@@ -245,8 +244,8 @@ def test_unproject_lut_grid_stride_can_be_fractional() -> None:
     assert stride_y == pytest.approx(12.0 / 4.0)
 
 
-def test_unproject_lut_bounds_modes_match_expected_behavior() -> None:
-    """Strict, clamp, and extrapolate modes behave safely and predictably."""
+def test_unproject_lut_out_of_bounds_returns_nan_and_mask() -> None:
+    """Out-of-domain pixels get NaN rays and False in the valid mask."""
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(5, 4))
     pixels = np.array(
@@ -258,35 +257,10 @@ def test_unproject_lut_bounds_modes_match_expected_behavior() -> None:
         ]
     )
 
-    with pytest.raises(ValueError, match="outside the LUT domain"):
-        lut.normalize_points(pixels, bounds="strict")
-
-    strict_rays, valid_mask = lut.normalize_points(
-        pixels,
-        bounds="strict",
-        return_valid_mask=True,
-    )
+    rays, valid_mask = lut.normalize_points(pixels)
     np.testing.assert_array_equal(valid_mask, np.array([False, True, True, False]))
-    assert np.isnan(strict_rays[0, 0]) and np.isnan(strict_rays[0, 1])
-    assert np.isnan(strict_rays[3, 0]) and np.isnan(strict_rays[3, 1])
-
-    clamped_pixels = np.column_stack(
-        [
-            np.clip(pixels[:, 0], 0.0, model.image_width - 1),
-            np.clip(pixels[:, 1], 0.0, model.image_height - 1),
-        ]
-    )
-    clamp_expected = model.normalize_points(clamped_pixels)
-    clamp_actual = lut.normalize_points(pixels, interpolation="bilinear", bounds="clamp")
-    np.testing.assert_allclose(clamp_actual, clamp_expected, atol=1e-5)
-
-    extrap_expected = model.normalize_points(pixels)
-    extrap_actual = lut.normalize_points(
-        pixels,
-        interpolation="bilinear",
-        bounds="extrapolate",
-    )
-    np.testing.assert_allclose(extrap_actual, extrap_expected, atol=1e-5)
+    assert np.isnan(rays[0, 0]) and np.isnan(rays[0, 1])
+    assert np.isnan(rays[3, 0]) and np.isnan(rays[3, 1])
 
 
 def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> None:
@@ -302,8 +276,8 @@ def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> 
         ]
     )
     np.testing.assert_allclose(
-        small_lut.normalize_points(sample_pixels, interpolation="bicubic"),
-        small_lut.normalize_points(sample_pixels, interpolation="bilinear"),
+        small_lut.normalize_points(sample_pixels, interpolation="bicubic")[0],
+        small_lut.normalize_points(sample_pixels, interpolation="bilinear")[0],
         atol=1e-5,
     )
 
@@ -315,12 +289,11 @@ def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> 
             [model.image_width - 1.0, model.image_height * 0.5],
             [model.image_width * 0.5, 0.0],
             [model.image_width * 0.5, model.image_height - 1.0],
-            [-10.0, model.image_height * 0.25],
         ]
     )
     np.testing.assert_allclose(
-        lut.normalize_points(boundary_pixels, interpolation="bicubic", bounds="clamp"),
-        lut.normalize_points(boundary_pixels, interpolation="bilinear", bounds="clamp"),
+        lut.normalize_points(boundary_pixels, interpolation="bicubic")[0],
+        lut.normalize_points(boundary_pixels, interpolation="bilinear")[0],
         atol=1e-5,
     )
 
@@ -346,8 +319,7 @@ def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
     grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
     pixels = np.column_stack([grid_x.ravel(), grid_y.ravel()])
     exact = model.normalize_points(pixels)
-    approx = lut.normalize_points(pixels, interpolation="bilinear")
-    assert isinstance(approx, np.ndarray)
+    approx, _ = lut.normalize_points(pixels, interpolation="bilinear")
     dense_error = _query_error_deg(exact, approx)
     assert dense_error <= (report.max_angular_error_mdeg["bilinear"] / 1.0e3) + 1.0
 
@@ -498,21 +470,17 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
                 auto const q0 = lut.query(
                     4.25,
                     3.5,
-                    lensboy::InterpolationMode::kBilinear,
-                    lensboy::BoundsMode::kStrict
+                    lensboy::InterpolationMode::kBilinear
                 );
                 auto const q1 = lut.query(
                     -1.0,
                     2.0,
-                    lensboy::InterpolationMode::kBilinear,
-                    lensboy::BoundsMode::kStrict
+                    lensboy::InterpolationMode::kBilinear
                 );
                 auto const q2 = lut.query(
-                    -1.0,
+                    0.0,
                     2.0,
-                    lensboy::InterpolationMode::kBilinear,
-                    lensboy::BoundsMode::kExtrapolate,
-                    false
+                    lensboy::InterpolationMode::kBicubic
                 );
 
                 std::cout << std::setprecision(17);
@@ -521,14 +489,6 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
                 std::cout << q1.valid << "\\n";
                 std::cout << q2.valid << " " << q2.ray[0] << " " << q2.ray[1] << " "
                           << q2.ray[2] << "\\n";
-                auto const q3 = lut.query(
-                    0.0,
-                    2.0,
-                    lensboy::InterpolationMode::kBicubic,
-                    lensboy::BoundsMode::kStrict
-                );
-                std::cout << q3.valid << " " << q3.ray[0] << " " << q3.ray[1] << " "
-                          << q3.ray[2] << "\\n";
                 return 0;
             }
             """
@@ -560,15 +520,15 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
         text=True,
     )
     lines = run_result.stdout.strip().splitlines()
-    assert len(lines) == 4
+    assert len(lines) == 3
 
     q0_tokens = lines[0].split()
     assert q0_tokens[0] == "1"
-    python_q0 = loaded.normalize_points(
+    python_q0, _ = loaded.normalize_points(
         np.array([[4.25, 3.5]]),
         interpolation="bilinear",
-        bounds="strict",
-    )[0]
+    )
+    python_q0 = python_q0[0]
     python_q0 = python_q0 / np.linalg.norm(python_q0)
     np.testing.assert_allclose(
         np.array([float(q0_tokens[1]), float(q0_tokens[2]), float(q0_tokens[3])]),
@@ -580,27 +540,14 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
 
     q2_tokens = lines[2].split()
     assert q2_tokens[0] == "1"
-    python_q2 = loaded.normalize_points(
-        np.array([[-1.0, 2.0]]),
-        interpolation="bilinear",
-        bounds="extrapolate",
-    )[0]
+    python_q2, _ = loaded.normalize_points(
+        np.array([[0.0, 2.0]]),
+        interpolation="bicubic",
+    )
+    python_q2 = python_q2[0]
+    python_q2 = python_q2 / np.linalg.norm(python_q2)
     np.testing.assert_allclose(
         np.array([float(q2_tokens[1]), float(q2_tokens[2]), float(q2_tokens[3])]),
         python_q2,
-        atol=1e-5,
-    )
-
-    q3_tokens = lines[3].split()
-    assert q3_tokens[0] == "1"
-    python_q3 = loaded.normalize_points(
-        np.array([[0.0, 2.0]]),
-        interpolation="bilinear",
-        bounds="strict",
-    )[0]
-    python_q3 = python_q3 / np.linalg.norm(python_q3)
-    np.testing.assert_allclose(
-        np.array([float(q3_tokens[1]), float(q3_tokens[2]), float(q3_tokens[3])]),
-        python_q3,
         atol=5e-4,
     )
