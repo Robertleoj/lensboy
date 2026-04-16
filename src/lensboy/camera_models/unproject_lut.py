@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from lensboy import lensboy_bindings as lbb
 from importlib.metadata import version as _package_version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+from lensboy import lensboy_bindings as lbb
 
 if TYPE_CHECKING:
     from lensboy.camera_models.base_model import CameraModel
@@ -602,4 +603,3 @@ class UnprojectLUT:
         weighted_x = np.sum(neighborhood * wx[:, None, :, None], axis=2)
         bilinear_xy[cubic_mask] = np.sum(weighted_x * wy[:, :, None], axis=1)
         return bilinear_xy
-

@@ -574,9 +574,7 @@ class UnprojectLUTErrorHeatmap:
         """
         with np.load(Path(path)) as heatmap_data:
             return UnprojectLUTErrorHeatmap(
-                interpolation=str(
-                    np.asarray(heatmap_data["interpolation"]).item()
-                ),
+                interpolation=str(np.asarray(heatmap_data["interpolation"]).item()),
                 max_depth=int(np.asarray(heatmap_data["max_depth"]).item()),
                 min_cell_size=float(np.asarray(heatmap_data["min_cell_size"]).item()),
                 cell_x_edges=np.asarray(heatmap_data["cell_x_edges"], dtype=np.float64),
