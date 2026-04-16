@@ -182,11 +182,7 @@ def _estimate_cells_error_detail_batch(
     flat_points = sample_points.reshape(-1, 2)
     exact_rays = normalize_points_fn(flat_points)
     exact_xy = np.asarray(exact_rays[:, :2], dtype=np.float64)
-    approx_xy = lut._interpolate_xy(
-        flat_points[:, 0],
-        flat_points[:, 1],
-        mode,
-    )
+    approx_xy = lut._interpolate_xy(flat_points, mode)
     errors = _angular_error_deg_from_xy(exact_xy, approx_xy).reshape(len(x0), 9)
     error_delta_xy = (approx_xy - exact_xy).reshape(len(x0), 9, 2)
 
@@ -233,11 +229,7 @@ def _estimate_cell_error_detail(
     sample_points = _sample_cell_points(x0, x1, y0, y1)
     exact_rays = normalize_points_fn(sample_points)
     exact_xy = np.asarray(exact_rays[:, :2], dtype=np.float64)
-    approx_xy = lut._interpolate_xy(
-        sample_points[:, 0],
-        sample_points[:, 1],
-        mode,
-    )
+    approx_xy = lut._interpolate_xy(sample_points, mode)
     errors = _angular_error_deg_from_xy(exact_xy, approx_xy)
     sampled_errors_deg.extend(errors.tolist())
     error_delta_xy = approx_xy - exact_xy
@@ -793,12 +785,7 @@ def _estimate_adaptive_errors(
         exact_rays = normalize_points_fn(sample_points)
         exact_xy = np.asarray(exact_rays[:, :2], dtype=np.float64)
         for mode in interpolations:
-            approx_xy = lut._interpolate_xy(
-                sample_points[:, 0],
-                sample_points[:, 1],
-                mode,
-                "strict",
-            )
+            approx_xy = lut._interpolate_xy(sample_points, mode)
             sample_errors_deg = _angular_error_deg_from_xy(exact_xy, approx_xy)
             max_errors_mdeg[mode] = (
                 float(np.max(sample_errors_deg)) * _ANGULAR_ERROR_MDEG_SCALE

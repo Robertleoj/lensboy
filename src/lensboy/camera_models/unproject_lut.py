@@ -25,13 +25,12 @@ SUPPORTED_INTERPOLATIONS: tuple[str, ...] = (
 )
 
 
-def _validate_interpolation_mode(interpolation: str) -> str:
+def _validate_interpolation_mode(interpolation: str) -> None:
     if interpolation not in SUPPORTED_INTERPOLATIONS:
         raise ValueError(
             f"Unsupported interpolation mode {interpolation!r}. "
             f"Expected one of {SUPPORTED_INTERPOLATIONS}."
         )
-    return interpolation
 
 
 def _catmull_rom_weights(t: np.ndarray) -> np.ndarray:
@@ -119,8 +118,6 @@ def _compute_seed_grid(
     # the valid FOV can fold back into the image under heavy distortion,
     # but the stereographic margin is tight enough that these are rare
     # and the Newton solver handles them via the pinhole fallback guess.
-    w = camera_model.image_width
-    h = camera_model.image_height
     outside = (
         (seed_pixels[:, 0] < -0.5)
         | (seed_pixels[:, 0] > w - 0.5)
@@ -232,6 +229,21 @@ def _compute_grid_scale(size: int, minimum: float, maximum: float) -> float:
     return (size - 1) / (maximum - minimum)
 
 
+def _linear_indices_and_weights(
+    g: np.ndarray,
+    size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if size == 1:
+        return np.zeros(len(g), dtype=np.int64), np.zeros(len(g), dtype=np.float64)
+
+    g_clipped = np.clip(g, 0.0, size - 1.0)
+    base = np.floor(g_clipped).astype(np.int64)
+    base = np.minimum(base, size - 2)
+    t = g_clipped - base
+
+    return base, t
+
+
 @dataclass
 class UnprojectLUT:
     """Regular-grid cache of `normalize_points()` values.
@@ -251,9 +263,6 @@ class UnprojectLUT:
         grid_y_max: Maximum pixel y covered by the LUT.
         xy_grid: Cached x/y ray components with shape ``(grid_height, grid_width, 2)``.
         lensboy_version: Package version that produced the LUT.
-
-    Returns:
-        A runtime lookup table that can save, load, and query cached unprojection rays.
     """
 
     image_width: int
@@ -477,65 +486,57 @@ class UnprojectLUT:
             Tuple of (rays, valid_mask) where rays has shape ``(N, 3)`` and
             valid_mask has shape ``(N,)``.
         """
-        interpolation = _validate_interpolation_mode(interpolation)
+        _validate_interpolation_mode(interpolation)
 
         pts = np.asarray(pixel_coords, dtype=np.float64)
         if pts.ndim != 2 or pts.shape[1] != 2:
             raise ValueError(f"pixel_coords must have shape (N, 2), got {pts.shape}.")
 
-        query_x = pts[:, 0]
-        query_y = pts[:, 1]
-        valid_mask = self._valid_mask(query_x, query_y)
+        valid_mask = self._valid_mask(pts)
 
         rays = np.full((len(pts), 3), np.nan, dtype=np.float64)
         rays[:, 2] = 1.0
 
         if np.any(valid_mask):
-            approx_xy = self._interpolate_xy(
-                query_x[valid_mask], query_y[valid_mask], interpolation
-            )
+            approx_xy = self._interpolate_xy(pts[valid_mask], interpolation)
             rays[valid_mask, :2] = approx_xy
 
         return rays, valid_mask
 
-    def _valid_mask(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    def _valid_mask(self, pixels_xy: np.ndarray) -> np.ndarray:
         return (
-            (x >= self.grid_x_min)
-            & (x <= self.grid_x_max)
-            & (y >= self.grid_y_min)
-            & (y <= self.grid_y_max)
+            (pixels_xy[:, 0] >= self.grid_x_min)
+            & (pixels_xy[:, 0] <= self.grid_x_max)
+            & (pixels_xy[:, 1] >= self.grid_y_min)
+            & (pixels_xy[:, 1] <= self.grid_y_max)
         )
 
     def _interpolate_xy(
         self,
-        x: np.ndarray,
-        y: np.ndarray,
+        pixels_xy: np.ndarray,
         interpolation: str,
     ) -> np.ndarray:
-        if len(x) == 0:
+        if len(pixels_xy) == 0:
             return np.empty((0, 2), dtype=np.float64)
 
-        gx = (x - self.grid_x_min) * self._grid_scale_x
-        gy = (y - self.grid_y_min) * self._grid_scale_y
+        grid_xy = np.empty_like(pixels_xy)
+        grid_xy[:, 0] = (pixels_xy[:, 0] - self.grid_x_min) * self._grid_scale_x
+        grid_xy[:, 1] = (pixels_xy[:, 1] - self.grid_y_min) * self._grid_scale_y
 
         if interpolation == "nearest":
-            return self._query_nearest(gx, gy)
+            return self._query_nearest(grid_xy)
         if interpolation == "bilinear":
-            return self._query_bilinear(gx, gy)
-        return self._query_bicubic(gx, gy)
+            return self._query_bilinear(grid_xy)
+        return self._query_bicubic(grid_xy)
 
-    def _query_nearest(self, gx: np.ndarray, gy: np.ndarray) -> np.ndarray:
-        ix = np.clip(np.rint(gx).astype(np.int64), 0, self.grid_width - 1)
-        iy = np.clip(np.rint(gy).astype(np.int64), 0, self.grid_height - 1)
+    def _query_nearest(self, grid_xy: np.ndarray) -> np.ndarray:
+        ix = np.clip(np.rint(grid_xy[:, 0]).astype(np.int64), 0, self.grid_width - 1)
+        iy = np.clip(np.rint(grid_xy[:, 1]).astype(np.int64), 0, self.grid_height - 1)
         return self.xy_grid[iy, ix]
 
-    def _query_bilinear(
-        self,
-        gx: np.ndarray,
-        gy: np.ndarray,
-    ) -> np.ndarray:
-        ix0, tx = self._linear_indices_and_weights(gx, self.grid_width)
-        iy0, ty = self._linear_indices_and_weights(gy, self.grid_height)
+    def _query_bilinear(self, grid_xy: np.ndarray) -> np.ndarray:
+        ix0, tx = _linear_indices_and_weights(grid_xy[:, 0], self.grid_width)
+        iy0, ty = _linear_indices_and_weights(grid_xy[:, 1], self.grid_height)
 
         ix1 = np.clip(ix0 + 1, 0, self.grid_width - 1)
         iy1 = np.clip(iy0 + 1, 0, self.grid_height - 1)
@@ -551,17 +552,13 @@ class UnprojectLUT:
         bottom = v01 * (1.0 - tx_col) + v11 * tx_col
         return top * (1.0 - ty_col) + bottom * ty_col
 
-    def _query_bicubic(
-        self,
-        gx: np.ndarray,
-        gy: np.ndarray,
-    ) -> np.ndarray:
-        bilinear_xy = self._query_bilinear(gx, gy)
+    def _query_bicubic(self, grid_xy: np.ndarray) -> np.ndarray:
+        bilinear_xy = self._query_bilinear(grid_xy)
         if self.grid_width < 4 or self.grid_height < 4:
             return bilinear_xy
 
-        gx_work = np.clip(gx, 0.0, self.grid_width - 1.0)
-        gy_work = np.clip(gy, 0.0, self.grid_height - 1.0)
+        gx_work = np.clip(grid_xy[:, 0], 0.0, self.grid_width - 1.0)
+        gy_work = np.clip(grid_xy[:, 1], 0.0, self.grid_height - 1.0)
 
         ix1 = np.floor(gx_work).astype(np.int64)
         iy1 = np.floor(gy_work).astype(np.int64)
@@ -606,17 +603,3 @@ class UnprojectLUT:
         bilinear_xy[cubic_mask] = np.sum(weighted_x * wy[:, :, None], axis=1)
         return bilinear_xy
 
-    @staticmethod
-    def _linear_indices_and_weights(
-        g: np.ndarray,
-        size: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        if size == 1:
-            return np.zeros(len(g), dtype=np.int64), np.zeros(len(g), dtype=np.float64)
-
-        g_clipped = np.clip(g, 0.0, size - 1.0)
-        base = np.floor(g_clipped).astype(np.int64)
-        base = np.minimum(base, size - 2)
-        t = g_clipped - base
-
-        return base, t
