@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -26,16 +27,17 @@ struct UnprojectLUTMetadata {
     double grid_x_max = 0.0;
     double grid_y_min = 0.0;
     double grid_y_max = 0.0;
-    std::string_view lensboy_version;
+    std::string lensboy_version;
 };
 
 struct UnprojectLUTQueryResult {
-    bool valid = false;
-    double ray[3] = {
-        std::numeric_limits<double>::quiet_NaN(),
-        std::numeric_limits<double>::quiet_NaN(),
-        std::numeric_limits<double>::quiet_NaN(),
-    };
+    bool valid;
+    double ray[3];
+
+    static UnprojectLUTQueryResult invalid() noexcept {
+        double const nan = std::numeric_limits<double>::quiet_NaN();
+        return UnprojectLUTQueryResult{false, {nan, nan, nan}};
+    }
 };
 
 class UnprojectLUT {
@@ -61,8 +63,7 @@ class UnprojectLUT {
    private:
     UnprojectLUT(
         UnprojectLUTMetadata metadata,
-        std::vector<double> xy_grid,
-        std::vector<char> string_storage
+        std::vector<double> xy_grid
     );
 
     std::size_t flat_index(
@@ -83,7 +84,21 @@ class UnprojectLUT {
         double pixel_y
     ) const noexcept;
 
-    std::vector<char> string_storage_;
+    PixelXY query_nearest(
+        double gx,
+        double gy
+    ) const noexcept;
+
+    PixelXY query_bilinear(
+        double gx,
+        double gy
+    ) const noexcept;
+
+    PixelXY query_bicubic(
+        double gx,
+        double gy
+    ) const noexcept;
+
     UnprojectLUTMetadata metadata_;
     std::vector<double> xy_grid_;
     double grid_scale_x_ = 0.0;

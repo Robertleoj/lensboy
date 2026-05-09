@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -15,10 +14,6 @@
 
 namespace lensboy {
 namespace {
-
-double quiet_nan() {
-    return std::numeric_limits<double>::quiet_NaN();
-}
 
 bool is_finite(
     PixelXY const& value
@@ -50,19 +45,6 @@ PixelXY add_scaled(
     };
 }
 
-std::string_view append_string_view(
-    std::vector<char>& storage,
-    std::string const& text
-) {
-    if (text.empty()) {
-        return {};
-    }
-    std::size_t const offset = storage.size();
-    storage.insert(storage.end(), text.begin(), text.end());
-    storage.push_back('\0');
-    return std::string_view(storage.data() + offset, text.size());
-}
-
 void normalize_ray(
     double ray[3]
 ) {
@@ -79,55 +61,34 @@ void normalize_ray(
     ray[2] /= norm;
 }
 
-UnprojectLUTQueryResult invalid_result() {
-    return UnprojectLUTQueryResult{};
-}
-
 }  // namespace
 
 UnprojectLUT::UnprojectLUT(
     UnprojectLUTMetadata metadata,
-    std::vector<double> xy_grid,
-    std::vector<char> string_storage
-) : string_storage_(std::move(string_storage)),
-    metadata_(std::move(metadata)),
+    std::vector<double> xy_grid
+) : metadata_(std::move(metadata)),
     xy_grid_(std::move(xy_grid)) {
     if (metadata_.image_width == 0 or metadata_.image_height == 0) {
         throw std::runtime_error("Image dimensions must be positive.");
     }
-    if (metadata_.grid_width == 0 or metadata_.grid_height == 0) {
-        throw std::runtime_error("Grid dimensions must be positive.");
+    if (metadata_.grid_width < 2 or metadata_.grid_height < 2) {
+        throw std::runtime_error("Grid dimensions must be at least 2 in each axis.");
     }
     if (
-        metadata_.grid_x_max < metadata_.grid_x_min or
-        metadata_.grid_y_max < metadata_.grid_y_min
+        metadata_.grid_x_max <= metadata_.grid_x_min or
+        metadata_.grid_y_max <= metadata_.grid_y_min
     ) {
-        throw std::runtime_error("Grid extents must be ordered from min to max.");
+        throw std::runtime_error("Grid extents must have positive span.");
     }
     if (xy_grid_.size() != metadata_.grid_width * metadata_.grid_height * 2) {
         throw std::runtime_error("xy_grid size does not match metadata.");
     }
 
-    if (metadata_.grid_width <= 1 or metadata_.grid_x_max == metadata_.grid_x_min) {
-        grid_scale_x_ = 0.0;
-    } else {
-        grid_scale_x_ = static_cast<double>(metadata_.grid_width - 1) /
-                        (metadata_.grid_x_max - metadata_.grid_x_min);
-    }
-    if (
-        metadata_.grid_height <= 1 or
-        metadata_.grid_y_max == metadata_.grid_y_min
-    ) {
-        grid_scale_y_ = 0.0;
-    } else {
-        grid_scale_y_ = static_cast<double>(metadata_.grid_height - 1) /
-                        (metadata_.grid_y_max - metadata_.grid_y_min);
-    }
+    grid_scale_x_ = static_cast<double>(metadata_.grid_width - 1) /
+                    (metadata_.grid_x_max - metadata_.grid_x_min);
+    grid_scale_y_ = static_cast<double>(metadata_.grid_height - 1) /
+                    (metadata_.grid_y_max - metadata_.grid_y_min);
 }
-
-namespace {
-
-}  // namespace
 
 UnprojectLUT UnprojectLUT::load(
     std::string_view const dir_path
@@ -142,7 +103,7 @@ UnprojectLUT UnprojectLUT::load(
     }
     nlohmann::json metadata = nlohmann::json::parse(metadata_file);
 
-    std::string const lensboy_version =
+    std::string lensboy_version =
         metadata.at("lensboy-version").get<std::string>();
     auto const dot = lensboy_version.find('.');
     std::string const major_str = lensboy_version.substr(0, dot);
@@ -176,16 +137,6 @@ UnprojectLUT UnprojectLUT::load(
         xy_grid[i] = static_cast<double>(raw[i]);
     }
 
-    std::vector<char> string_storage;
-    string_storage.reserve(lensboy_version.size() + 1);
-    auto const append = [&string_storage](std::string const& text) {
-        if (text.empty()) return std::string_view{};
-        std::size_t const offset = string_storage.size();
-        string_storage.insert(string_storage.end(), text.begin(), text.end());
-        string_storage.push_back('\0');
-        return std::string_view(string_storage.data() + offset, text.size());
-    };
-
     UnprojectLUTMetadata lut_metadata;
     lut_metadata.image_width =
         metadata.at("image_width").get<std::size_t>();
@@ -197,13 +148,9 @@ UnprojectLUT UnprojectLUT::load(
     lut_metadata.grid_x_max = metadata.at("grid_x_max").get<double>();
     lut_metadata.grid_y_min = metadata.at("grid_y_min").get<double>();
     lut_metadata.grid_y_max = metadata.at("grid_y_max").get<double>();
-    lut_metadata.lensboy_version = append(lensboy_version);
+    lut_metadata.lensboy_version = std::move(lensboy_version);
 
-    return UnprojectLUT(
-        std::move(lut_metadata),
-        std::move(xy_grid),
-        std::move(string_storage)
-    );
+    return UnprojectLUT(std::move(lut_metadata), std::move(xy_grid));
 }
 
 UnprojectLUTMetadata const& UnprojectLUT::metadata() const noexcept {
@@ -237,6 +184,114 @@ double UnprojectLUT::grid_coordinate_y(
     return (pixel_y - metadata_.grid_y_min) * grid_scale_y_;
 }
 
+PixelXY UnprojectLUT::query_nearest(
+    double gx,
+    double gy
+) const noexcept {
+    long long const ix = std::llround(gx);
+    long long const iy = std::llround(gy);
+    std::size_t const sample_ix = static_cast<std::size_t>(
+        std::clamp<long long>(ix, 0, static_cast<long long>(metadata_.grid_width) - 1)
+    );
+    std::size_t const sample_iy = static_cast<std::size_t>(
+        std::clamp<long long>(iy, 0, static_cast<long long>(metadata_.grid_height) - 1)
+    );
+    return sample_node(sample_ix, sample_iy);
+}
+
+PixelXY UnprojectLUT::query_bilinear(
+    double gx,
+    double gy
+) const noexcept {
+    double const gx_work = std::clamp(
+        gx,
+        0.0,
+        static_cast<double>(metadata_.grid_width - 1)
+    );
+    double const gy_work = std::clamp(
+        gy,
+        0.0,
+        static_cast<double>(metadata_.grid_height - 1)
+    );
+
+    std::size_t const x0 = static_cast<std::size_t>(std::min(
+        static_cast<long long>(std::floor(gx_work)),
+        static_cast<long long>(metadata_.grid_width) - 2
+    ));
+    std::size_t const y0 = static_cast<std::size_t>(std::min(
+        static_cast<long long>(std::floor(gy_work)),
+        static_cast<long long>(metadata_.grid_height) - 2
+    ));
+    std::size_t const x1 = x0 + 1;
+    std::size_t const y1 = y0 + 1;
+
+    double const tx = gx_work - static_cast<double>(x0);
+    double const ty = gy_work - static_cast<double>(y0);
+
+    PixelXY const v00 = sample_node(x0, y0);
+    PixelXY const v10 = sample_node(x1, y0);
+    PixelXY const v01 = sample_node(x0, y1);
+    PixelXY const v11 = sample_node(x1, y1);
+
+    PixelXY const top = {{
+        v00.xy[0] * (1.0 - tx) + v10.xy[0] * tx,
+        v00.xy[1] * (1.0 - tx) + v10.xy[1] * tx,
+    }};
+    PixelXY const bottom = {{
+        v01.xy[0] * (1.0 - tx) + v11.xy[0] * tx,
+        v01.xy[1] * (1.0 - tx) + v11.xy[1] * tx,
+    }};
+    return {{
+        top.xy[0] * (1.0 - ty) + bottom.xy[0] * ty,
+        top.xy[1] * (1.0 - ty) + bottom.xy[1] * ty,
+    }};
+}
+
+PixelXY UnprojectLUT::query_bicubic(
+    double gx,
+    double gy
+) const noexcept {
+    if (metadata_.grid_width < 4 or metadata_.grid_height < 4) {
+        return query_bilinear(gx, gy);
+    }
+
+    double const gx_work =
+        std::clamp(gx, 0.0, static_cast<double>(metadata_.grid_width - 1));
+    double const gy_work =
+        std::clamp(gy, 0.0, static_cast<double>(metadata_.grid_height - 1));
+
+    long long const anchor_x = static_cast<long long>(std::floor(gx_work));
+    long long const anchor_y = static_cast<long long>(std::floor(gy_work));
+    bool const has_full_support =
+        anchor_x >= 1 and
+        anchor_x <= static_cast<long long>(metadata_.grid_width) - 3 and
+        anchor_y >= 1 and
+        anchor_y <= static_cast<long long>(metadata_.grid_height) - 3;
+    if (not has_full_support) {
+        return query_bilinear(gx, gy);
+    }
+
+    double const tx = gx_work - static_cast<double>(anchor_x);
+    double const ty = gy_work - static_cast<double>(anchor_y);
+
+    std::array<double, 4> const wx = catmull_rom_weights(tx);
+    std::array<double, 4> const wy = catmull_rom_weights(ty);
+    PixelXY accum = {{0.0, 0.0}};
+    for (int j = 0; j < 4; ++j) {
+        std::size_t const sample_y_idx =
+            static_cast<std::size_t>(anchor_y + j - 1);
+        PixelXY row = {{0.0, 0.0}};
+        for (int i = 0; i < 4; ++i) {
+            std::size_t const sample_x_idx =
+                static_cast<std::size_t>(anchor_x + i - 1);
+            PixelXY const node = sample_node(sample_x_idx, sample_y_idx);
+            row = add_scaled(row, node, wx[i]);
+        }
+        accum = add_scaled(accum, row, wy[j]);
+    }
+    return accum;
+}
+
 UnprojectLUTQueryResult UnprojectLUT::query(
     double pixel_x,
     double pixel_y,
@@ -249,137 +304,23 @@ UnprojectLUTQueryResult UnprojectLUT::query(
                         pixel_y <= metadata_.grid_y_max;
 
     if (not inside) {
-        return invalid_result();
+        return UnprojectLUTQueryResult::invalid();
     }
 
     double const gx = grid_coordinate_x(pixel_x);
     double const gy = grid_coordinate_y(pixel_y);
 
-    PixelXY xy = {{quiet_nan(), quiet_nan()}};
-
-    auto const bilinear_xy = [this, gx, gy]() -> PixelXY {
-        long long ix0 = 0;
-        long long iy0 = 0;
-        double tx = 0.0;
-        double ty = 0.0;
-
-        if (metadata_.grid_width > 1) {
-            double const gx_work = std::clamp(
-                gx,
-                0.0,
-                static_cast<double>(metadata_.grid_width - 1)
-            );
-            ix0 = static_cast<long long>(std::floor(gx_work));
-            ix0 = std::clamp<long long>(
-                ix0,
-                0,
-                static_cast<long long>(metadata_.grid_width) - 2
-            );
-            tx = gx_work - static_cast<double>(ix0);
-        }
-
-        if (metadata_.grid_height > 1) {
-            double const gy_work = std::clamp(
-                gy,
-                0.0,
-                static_cast<double>(metadata_.grid_height - 1)
-            );
-            iy0 = static_cast<long long>(std::floor(gy_work));
-            iy0 = std::clamp<long long>(
-                iy0,
-                0,
-                static_cast<long long>(metadata_.grid_height) - 2
-            );
-            ty = gy_work - static_cast<double>(iy0);
-        }
-
-        std::size_t const x0 = static_cast<std::size_t>(ix0);
-        std::size_t const x1 =
-            std::min<std::size_t>(x0 + 1, metadata_.grid_width - 1);
-        std::size_t const y0 = static_cast<std::size_t>(iy0);
-        std::size_t const y1 =
-            std::min<std::size_t>(y0 + 1, metadata_.grid_height - 1);
-
-        PixelXY const v00 = sample_node(x0, y0);
-        PixelXY const v10 = sample_node(x1, y0);
-        PixelXY const v01 = sample_node(x0, y1);
-        PixelXY const v11 = sample_node(x1, y1);
-
-        PixelXY const top = {{
-            v00.xy[0] * (1.0 - tx) + v10.xy[0] * tx,
-            v00.xy[1] * (1.0 - tx) + v10.xy[1] * tx,
-        }};
-        PixelXY const bottom = {{
-            v01.xy[0] * (1.0 - tx) + v11.xy[0] * tx,
-            v01.xy[1] * (1.0 - tx) + v11.xy[1] * tx,
-        }};
-        return {{
-            top.xy[0] * (1.0 - ty) + bottom.xy[0] * ty,
-            top.xy[1] * (1.0 - ty) + bottom.xy[1] * ty,
-        }};
-    };
-
-    if (interpolation == InterpolationMode::kNearest) {
-        long long const ix = std::llround(gx);
-        long long const iy = std::llround(gy);
-        std::size_t const sample_ix = static_cast<std::size_t>(
-            std::clamp<long long>(ix, 0, static_cast<long long>(metadata_.grid_width) - 1)
-        );
-        std::size_t const sample_iy = static_cast<std::size_t>(
-            std::clamp<long long>(
-                iy,
-                0,
-                static_cast<long long>(metadata_.grid_height) - 1
-            )
-        );
-        xy = sample_node(sample_ix, sample_iy);
-    } else if (interpolation == InterpolationMode::kBilinear) {
-        xy = bilinear_xy();
-    } else if (interpolation == InterpolationMode::kBicubic) {
-        if (metadata_.grid_width < 4 or metadata_.grid_height < 4) {
-            xy = bilinear_xy();
-        } else {
-            double const gx_work =
-                std::clamp(gx, 0.0, static_cast<double>(metadata_.grid_width - 1));
-            double const gy_work =
-                std::clamp(gy, 0.0, static_cast<double>(metadata_.grid_height - 1));
-
-            long long const anchor_x = static_cast<long long>(std::floor(gx_work));
-            long long const anchor_y = static_cast<long long>(std::floor(gy_work));
-            bool const has_full_support =
-                anchor_x >= 1 and
-                anchor_x <= static_cast<long long>(metadata_.grid_width) - 3 and
-                anchor_y >= 1 and
-                anchor_y <= static_cast<long long>(metadata_.grid_height) - 3;
-            if (not has_full_support) {
-                xy = bilinear_xy();
-            } else {
-                double const tx = gx_work - static_cast<double>(anchor_x);
-                double const ty = gy_work - static_cast<double>(anchor_y);
-
-                std::array<double, 4> const wx = catmull_rom_weights(tx);
-                std::array<double, 4> const wy = catmull_rom_weights(ty);
-                PixelXY accum = {{0.0, 0.0}};
-                for (int j = 0; j < 4; ++j) {
-                    std::size_t const sample_y_idx =
-                        static_cast<std::size_t>(anchor_y + j - 1);
-                    PixelXY row = {{0.0, 0.0}};
-                    for (int i = 0; i < 4; ++i) {
-                        std::size_t const sample_x_idx =
-                            static_cast<std::size_t>(anchor_x + i - 1);
-                        PixelXY const node = sample_node(
-                            sample_x_idx,
-                            sample_y_idx
-                        );
-                        row = add_scaled(row, node, wx[i]);
-                    }
-                    accum = add_scaled(accum, row, wy[j]);
-                }
-                xy = accum;
-            }
-        }
-    } else {
-        throw std::runtime_error("Unreachable interpolation mode.");
+    PixelXY xy = {{0.0, 0.0}};
+    switch (interpolation) {
+        case InterpolationMode::kNearest:
+            xy = query_nearest(gx, gy);
+            break;
+        case InterpolationMode::kBilinear:
+            xy = query_bilinear(gx, gy);
+            break;
+        case InterpolationMode::kBicubic:
+            xy = query_bicubic(gx, gy);
+            break;
     }
 
     if (not is_finite(xy)) {
