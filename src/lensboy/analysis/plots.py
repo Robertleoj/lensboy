@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -2154,13 +2153,15 @@ def plot_projection_diff(
 
 
 def plot_unproject_lut_error_heatmap(
-    heatmap: UnprojectLUTErrorHeatmap | Path | str,
+    heatmap: UnprojectLUTErrorHeatmap,
     *,
     title: str | None = None,
     angular_unit: Literal["deg", "mdeg", "udeg", "rad", "mrad", "urad"] = "mdeg",
+    vmax: float | None = None,
     show_directions: bool = True,
     arrow_grid: int = 28,
     arrow_scale: float = 0.5,
+    constant_arrow_length: bool = False,
     cmap_name: str = "inferno",
     figsize: tuple[float, float] = (8.5, 6.0),
     return_figure: bool = False,
@@ -2168,15 +2169,24 @@ def plot_unproject_lut_error_heatmap(
     """Plot an unproject LUT error heatmap.
 
     Draws the per-cell maximum angular error as a heatmap and can overlay the
-    direction of the local peak x/y interpolation error in each cell.
+    direction of the local peak x/y interpolation error in each cell. Arrow
+    length is proportional to per-cell error magnitude by default.
 
     Args:
-        heatmap: In-memory heatmap object or path to a saved heatmap archive.
+        heatmap: In-memory heatmap object.
         title: Plot title. Uses the archive interpolation mode when omitted.
         angular_unit: Angular units for the heatmap color scale.
+        vmax: Upper limit of the colorbar in the same units as ``angular_unit``.
+            Cells above this clip to the top colour. ``None`` auto-fits to the
+            data.
         show_directions: Whether to draw the error-direction arrows.
         arrow_grid: Approximate maximum number of arrows along the longer heatmap axis.
-        arrow_scale: Arrow length as a fraction of the spacing between drawn arrows.
+        arrow_scale: Arrow length, as a fraction of the spacing between drawn
+            arrows, for the largest-error cell drawn. Other arrows scale down
+            proportionally to their error magnitude (or are all this length when
+            ``constant_arrow_length=True``).
+        constant_arrow_length: If True, draw all arrows the same length
+            regardless of per-cell error magnitude.
         cmap_name: Matplotlib colormap name for the heatmap.
         figsize: Figure size in inches as ``(width, height)``.
         return_figure: If True, return the figure instead of calling ``plt.show()``.
@@ -2184,22 +2194,15 @@ def plot_unproject_lut_error_heatmap(
     Returns:
         The figure if ``return_figure`` is True, otherwise None.
     """
-    from lensboy.analysis.unproject_lut import UnprojectLUTErrorHeatmap
-
-    if isinstance(heatmap, (str, Path)):
-        heatmap_obj = UnprojectLUTErrorHeatmap.load(heatmap)
-    else:
-        heatmap_obj = heatmap
-
-    x_edges = np.asarray(heatmap_obj.cell_x_edges, dtype=np.float64).copy()
-    y_edges = np.asarray(heatmap_obj.cell_y_edges, dtype=np.float64).copy()
+    x_edges = np.asarray(heatmap.cell_x_edges, dtype=np.float64).copy()
+    y_edges = np.asarray(heatmap.cell_y_edges, dtype=np.float64).copy()
     max_angular_error_deg = np.asarray(
-        heatmap_obj.max_angular_error_deg, dtype=np.float64
+        heatmap.max_angular_error_deg, dtype=np.float64
     ).copy()
     error_direction_xy = np.asarray(
-        heatmap_obj.error_direction_xy, dtype=np.float64
+        heatmap.error_direction_xy, dtype=np.float64
     ).copy()
-    interpolation = heatmap_obj.interpolation
+    interpolation = heatmap.interpolation
 
     angular_unit_scales = {
         "deg": (1.0, "degrees"),
@@ -2271,6 +2274,7 @@ def plot_unproject_lut_error_heatmap(
         cmap=cmap_name,
         extent=[x_extent_min, x_extent_max, y_extent_max, y_extent_min],  # type: ignore[arg-type]
         aspect="equal",
+        vmax=vmax,
     )
     cbar: Colorbar = fig.colorbar(im, ax=ax, shrink=0.8, fraction=0.035, pad=0.02)
     cbar.set_label(f"max angular error [{unit_label}]", color=fg)
@@ -2296,18 +2300,29 @@ def plot_unproject_lut_error_heatmap(
             int(np.ceil(max(max_angular_error_deg.shape) / max(int(arrow_grid), 1))),
         )
         arrow_spacing = quiver_stride * min(x_cell_size, y_cell_size)
-        arrow_length = arrow_scale * arrow_spacing
+        max_arrow_length = arrow_scale * arrow_spacing
         quiver_slice = (
             slice(None, None, quiver_stride),
             slice(None, None, quiver_stride),
         )
         quiver_mask = max_angular_error_deg[quiver_slice] > 0.0
 
+        if constant_arrow_length:
+            length_factor = np.full(int(np.sum(quiver_mask)), max_arrow_length)
+        else:
+            magnitudes = max_angular_error_deg[quiver_slice][quiver_mask]
+            mag_max = float(np.max(magnitudes)) if magnitudes.size > 0 else 0.0
+            length_factor = (
+                magnitudes * (max_arrow_length / mag_max)
+                if mag_max > 0.0
+                else np.zeros_like(magnitudes)
+            )
+
         ax.quiver(
             center_x[quiver_slice][quiver_mask],
             center_y[quiver_slice][quiver_mask],
-            error_direction_xy[..., 0][quiver_slice][quiver_mask] * arrow_length,
-            error_direction_xy[..., 1][quiver_slice][quiver_mask] * arrow_length,
+            error_direction_xy[..., 0][quiver_slice][quiver_mask] * length_factor,
+            error_direction_xy[..., 1][quiver_slice][quiver_mask] * length_factor,
             color=accent,
             angles="xy",
             scale_units="xy",

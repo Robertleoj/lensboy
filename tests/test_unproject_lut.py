@@ -512,7 +512,7 @@ def test_plot_unproject_lut_error_heatmap_supports_angular_units(tmp_path: Path)
     plt.close(fig)
 
 
-def test_plot_unproject_lut_error_heatmap_accepts_figsize(tmp_path: Path) -> None:
+def test_plot_unproject_lut_error_heatmap_accepts_figsize() -> None:
     """The heatmap plot helper forwards the requested figure size."""
     import matplotlib
 
@@ -526,12 +526,10 @@ def test_plot_unproject_lut_error_heatmap_accepts_figsize(tmp_path: Path) -> Non
 
     model = _make_linear_pinhole_model()
     lut = model.get_unproject_lut(grid_size_wh=(6, 5))
-    heatmap_path = tmp_path / "bilinear_error_heatmaps_figsize.npz"
     heatmap = compute_lut_error_heatmap(lut, model, interpolation="bilinear")
-    heatmap.save(heatmap_path)
 
     fig = plot_unproject_lut_error_heatmap(
-        heatmap_path,
+        heatmap,
         figsize=(7.8, 5.3),
         return_figure=True,
     )
