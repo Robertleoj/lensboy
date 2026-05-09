@@ -31,7 +31,7 @@ constexpr double kStepShrink = 0.5;
 constexpr double kMinStepRatio = 1.0e-12;
 
 // Approximate pixel spacing between gradient-ascent seeds inside a cell.
-// One seed per ~32 px of cell extent in each direction, with a one-seed
+// One seed per ~32 pixel_x of cell extent in each direction, with a one-seed
 // floor for tiny cells. Distortion functions are smooth, so the objective
 // is single-modal in every reasonable cell — coarse seeding suffices.
 constexpr double kSeedStridePixels = 32.0;
@@ -47,15 +47,15 @@ inline T relu(
 
 template <typename T>
 inline T penalty_outside_cell(
-    const T& px,
-    const T& py,
+    const T& pixel_x,
+    const T& pixel_y,
     double x0,
     double x1,
     double y0,
     double y1
 ) {
-    return relu(T(x0) - px) + relu(px - T(x1)) + relu(T(y0) - py) +
-           relu(py - T(y1));
+    return relu(T(x0) - pixel_x) + relu(pixel_x - T(x1)) +
+           relu(T(y0) - pixel_y) + relu(pixel_y - T(y1));
 }
 
 // Catmull-Rom weights matching the Python implementation.
@@ -75,29 +75,29 @@ inline void catmull_rom_weights_T(
 template <typename T>
 inline void interp_lut_nearest(
     const double* lut_xy_grid,
-    int Wgrid,
-    int Hgrid,
+    int grid_width,
+    int grid_height,
     double grid_x_min,
     double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
-    const T& px,
-    const T& py,
+    const T& pixel_x,
+    const T& pixel_y,
     T& out_x,
     T& out_y
 ) {
-    const double px_a = scalar_value(px);
-    const double py_a = scalar_value(py);
-    const double gx = (px_a - grid_x_min) * grid_scale_x;
-    const double gy = (py_a - grid_y_min) * grid_scale_y;
+    const double pixel_x_a = scalar_value(pixel_x);
+    const double pixel_y_a = scalar_value(pixel_y);
+    const double gx = (pixel_x_a - grid_x_min) * grid_scale_x;
+    const double gy = (pixel_y_a - grid_y_min) * grid_scale_y;
     // Match numpy's np.rint (round-half-to-even) so the C++ optimiser and
     // the Python LUT query agree at exact half-integer grid coordinates.
     // std::lround rounds half-away-from-zero and disagreed at .5 values.
     int ix = static_cast<int>(std::nearbyint(gx));
     int iy = static_cast<int>(std::nearbyint(gy));
-    ix = std::clamp(ix, 0, Wgrid - 1);
-    iy = std::clamp(iy, 0, Hgrid - 1);
-    const double* node = lut_xy_grid + (iy * Wgrid + ix) * 2;
+    ix = std::clamp(ix, 0, grid_width - 1);
+    iy = std::clamp(iy, 0, grid_height - 1);
+    const double* node = lut_xy_grid + (iy * grid_width + ix) * 2;
     out_x = T(node[0]);
     out_y = T(node[1]);
 }
@@ -105,47 +105,39 @@ inline void interp_lut_nearest(
 template <typename T>
 inline void interp_lut_bilinear(
     const double* lut_xy_grid,
-    int Wgrid,
-    int Hgrid,
+    int grid_width,
+    int grid_height,
     double grid_x_min,
     double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
-    const T& px,
-    const T& py,
+    const T& pixel_x,
+    const T& pixel_y,
     T& out_x,
     T& out_y
 ) {
-    const T gx = (px - T(grid_x_min)) * T(grid_scale_x);
-    const T gy = (py - T(grid_y_min)) * T(grid_scale_y);
+    const T gx = (pixel_x - T(grid_x_min)) * T(grid_scale_x);
+    const T gy = (pixel_y - T(grid_y_min)) * T(grid_scale_y);
 
-    int ix0 = 0;
-    int iy0 = 0;
-    T tx(0.0);
-    T ty(0.0);
+    const T gx_clip =
+        clamp_T(gx, T(0.0), T(static_cast<double>(grid_width - 1)));
+    int ix0 = static_cast<int>(std::floor(scalar_value(gx_clip)));
+    ix0 = std::clamp(ix0, 0, grid_width - 2);
+    const T tx = gx_clip - T(static_cast<double>(ix0));
 
-    if (Wgrid > 1) {
-        const T gx_clip =
-            clamp_T(gx, T(0.0), T(static_cast<double>(Wgrid - 1)));
-        ix0 = static_cast<int>(std::floor(scalar_value(gx_clip)));
-        ix0 = std::clamp(ix0, 0, Wgrid - 2);
-        tx = gx_clip - T(static_cast<double>(ix0));
-    }
-    if (Hgrid > 1) {
-        const T gy_clip =
-            clamp_T(gy, T(0.0), T(static_cast<double>(Hgrid - 1)));
-        iy0 = static_cast<int>(std::floor(scalar_value(gy_clip)));
-        iy0 = std::clamp(iy0, 0, Hgrid - 2);
-        ty = gy_clip - T(static_cast<double>(iy0));
-    }
+    const T gy_clip =
+        clamp_T(gy, T(0.0), T(static_cast<double>(grid_height - 1)));
+    int iy0 = static_cast<int>(std::floor(scalar_value(gy_clip)));
+    iy0 = std::clamp(iy0, 0, grid_height - 2);
+    const T ty = gy_clip - T(static_cast<double>(iy0));
 
-    const int ix1 = std::min(ix0 + 1, Wgrid - 1);
-    const int iy1 = std::min(iy0 + 1, Hgrid - 1);
+    const int ix1 = ix0 + 1;
+    const int iy1 = iy0 + 1;
 
-    const double* v00 = lut_xy_grid + (iy0 * Wgrid + ix0) * 2;
-    const double* v10 = lut_xy_grid + (iy0 * Wgrid + ix1) * 2;
-    const double* v01 = lut_xy_grid + (iy1 * Wgrid + ix0) * 2;
-    const double* v11 = lut_xy_grid + (iy1 * Wgrid + ix1) * 2;
+    const double* v00 = lut_xy_grid + (iy0 * grid_width + ix0) * 2;
+    const double* v10 = lut_xy_grid + (iy0 * grid_width + ix1) * 2;
+    const double* v01 = lut_xy_grid + (iy1 * grid_width + ix0) * 2;
+    const double* v11 = lut_xy_grid + (iy1 * grid_width + ix1) * 2;
 
     const T one_minus_tx = T(1.0) - tx;
     const T one_minus_ty = T(1.0) - ty;
@@ -160,57 +152,57 @@ inline void interp_lut_bilinear(
 template <typename T>
 inline void interp_lut_bicubic(
     const double* lut_xy_grid,
-    int Wgrid,
-    int Hgrid,
+    int grid_width,
+    int grid_height,
     double grid_x_min,
     double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
-    const T& px,
-    const T& py,
+    const T& pixel_x,
+    const T& pixel_y,
     T& out_x,
     T& out_y
 ) {
-    if (Wgrid < 4 || Hgrid < 4) {
+    if (grid_width < 4 || grid_height < 4) {
         interp_lut_bilinear(
             lut_xy_grid,
-            Wgrid,
-            Hgrid,
+            grid_width,
+            grid_height,
             grid_x_min,
             grid_y_min,
             grid_scale_x,
             grid_scale_y,
-            px,
-            py,
+            pixel_x,
+            pixel_y,
             out_x,
             out_y
         );
         return;
     }
 
-    const T gx = (px - T(grid_x_min)) * T(grid_scale_x);
-    const T gy = (py - T(grid_y_min)) * T(grid_scale_y);
+    const T gx = (pixel_x - T(grid_x_min)) * T(grid_scale_x);
+    const T gy = (pixel_y - T(grid_y_min)) * T(grid_scale_y);
     const T gx_clip =
-        clamp_T(gx, T(0.0), T(static_cast<double>(Wgrid - 1)));
+        clamp_T(gx, T(0.0), T(static_cast<double>(grid_width - 1)));
     const T gy_clip =
-        clamp_T(gy, T(0.0), T(static_cast<double>(Hgrid - 1)));
+        clamp_T(gy, T(0.0), T(static_cast<double>(grid_height - 1)));
 
     const int ix1 = static_cast<int>(std::floor(scalar_value(gx_clip)));
     const int iy1 = static_cast<int>(std::floor(scalar_value(gy_clip)));
 
-    const bool has_full_support =
-        (ix1 >= 1) && (ix1 <= Wgrid - 3) && (iy1 >= 1) && (iy1 <= Hgrid - 3);
+    const bool has_full_support = (ix1 >= 1) && (ix1 <= grid_width - 3) &&
+                                  (iy1 >= 1) && (iy1 <= grid_height - 3);
     if (!has_full_support) {
         interp_lut_bilinear(
             lut_xy_grid,
-            Wgrid,
-            Hgrid,
+            grid_width,
+            grid_height,
             grid_x_min,
             grid_y_min,
             grid_scale_x,
             grid_scale_y,
-            px,
-            py,
+            pixel_x,
+            pixel_y,
             out_x,
             out_y
         );
@@ -230,7 +222,8 @@ inline void interp_lut_bicubic(
         const int sample_y = iy1 + j - 1;
         for (int i = 0; i < 4; ++i) {
             const int sample_x = ix1 + i - 1;
-            const double* node = lut_xy_grid + (sample_y * Wgrid + sample_x) * 2;
+            const double* node =
+                lut_xy_grid + (sample_y * grid_width + sample_x) * 2;
             const T w = wy[j] * wx[i];
             out_x = out_x + w * node[0];
             out_y = out_y + w * node[1];
@@ -242,56 +235,56 @@ template <typename T>
 inline void interp_lut_dispatch(
     int interpolation_mode,
     const double* lut_xy_grid,
-    int Wgrid,
-    int Hgrid,
+    int grid_width,
+    int grid_height,
     double grid_x_min,
     double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
-    const T& px,
-    const T& py,
+    const T& pixel_x,
+    const T& pixel_y,
     T& out_x,
     T& out_y
 ) {
     if (interpolation_mode == kInterpNearest) {
         interp_lut_nearest(
             lut_xy_grid,
-            Wgrid,
-            Hgrid,
+            grid_width,
+            grid_height,
             grid_x_min,
             grid_y_min,
             grid_scale_x,
             grid_scale_y,
-            px,
-            py,
+            pixel_x,
+            pixel_y,
             out_x,
             out_y
         );
     } else if (interpolation_mode == kInterpBilinear) {
         interp_lut_bilinear(
             lut_xy_grid,
-            Wgrid,
-            Hgrid,
+            grid_width,
+            grid_height,
             grid_x_min,
             grid_y_min,
             grid_scale_x,
             grid_scale_y,
-            px,
-            py,
+            pixel_x,
+            pixel_y,
             out_x,
             out_y
         );
     } else {
         interp_lut_bicubic(
             lut_xy_grid,
-            Wgrid,
-            Hgrid,
+            grid_width,
+            grid_height,
             grid_x_min,
             grid_y_min,
             grid_scale_x,
             grid_scale_y,
-            px,
-            py,
+            pixel_x,
+            pixel_y,
             out_x,
             out_y
         );
@@ -355,21 +348,26 @@ inline void project_pinhole_splined_n(
     const double* pinhole_params,  // fx, fy, cx, cy
     const double* dx_grid,
     const double* dy_grid,
-    const T& nx,
-    const T& ny,
-    T& px,
-    T& py
+    const T& normalized_x,
+    const T& normalized_y,
+    T& pixel_x,
+    T& pixel_y
 ) {
     T x_spline, y_spline;
-    map.normalized_to_grid_coords(nx, ny, x_spline, y_spline);
+    map.normalized_to_grid_coords(
+        normalized_x,
+        normalized_y,
+        x_spline,
+        y_spline
+    );
 
     const T dx =
         eval_bspline2d_double_grid(dx_grid, map.Nx, map.Ny, x_spline, y_spline);
     const T dy =
         eval_bspline2d_double_grid(dy_grid, map.Nx, map.Ny, x_spline, y_spline);
 
-    px = T(pinhole_params[0]) * (nx + dx) + T(pinhole_params[2]);
-    py = T(pinhole_params[1]) * (ny + dy) + T(pinhole_params[3]);
+    pixel_x = T(pinhole_params[0]) * (normalized_x + dx) + T(pinhole_params[2]);
+    pixel_y = T(pinhole_params[1]) * (normalized_y + dy) + T(pinhole_params[3]);
 }
 
 // Project a normalized point through OpenCV with double constants. Wraps
@@ -378,20 +376,20 @@ inline void project_pinhole_splined_n(
 template <typename T>
 inline void project_opencv_n(
     const double* intrinsics,
-    const T& nx,
-    const T& ny,
-    T& px,
-    T& py
+    const T& normalized_x,
+    const T& normalized_y,
+    T& pixel_x,
+    T& pixel_y
 ) {
     T wrapped[18];
     for (int i = 0; i < 18; ++i) {
         wrapped[i] = T(intrinsics[i]);
     }
-    Vec3<T> point_in_cam(nx, ny, T(1.0));
+    Vec3<T> point_in_cam(normalized_x, normalized_y, T(1.0));
     Vec2<T> result;
     project_opencv<T>(wrapped, point_in_cam, result);
-    px = result[0];
-    py = result[1];
+    pixel_x = result[0];
+    pixel_y = result[1];
 }
 
 // Angular error in degrees between rays (exact_x, exact_y, 1) and
@@ -424,8 +422,8 @@ inline double angular_error_deg_from_xy(
 // angular formula divides by ‖r1‖·‖r2‖ which varies with position.
 //
 // The Project callable is invoked as:
-//   project(nx, ny, px, py)        for T=double
-//   project(jet_nx, jet_ny, ...)   for T=Jet2
+//   project(normalized_x, normalized_y, pixel_x, pixel_y)        for T=double
+//   project(jet_normalized_x, jet_normalized_y, ...)   for T=Jet2
 //
 // Returns (max_angular_error_deg, peak_pixel_x, peak_pixel_y).
 template <typename Project>
@@ -433,8 +431,8 @@ struct CellMaximizer {
     Project project;
     int interpolation_mode;
     const double* lut_xy_grid;
-    int Wgrid;
-    int Hgrid;
+    int grid_width;
+    int grid_height;
     double grid_x_min;
     double grid_y_min;
     double grid_scale_x;
@@ -444,79 +442,100 @@ struct CellMaximizer {
 
     template <typename T>
     inline T eval(
-        const T& nx,
-        const T& ny,
+        const T& normalized_x,
+        const T& normalized_y,
         double cell_x0,
         double cell_x1,
         double cell_y0,
         double cell_y1
     ) const {
-        T px, py;
-        project(nx, ny, px, py);
+        T pixel_x, pixel_y;
+        project(normalized_x, normalized_y, pixel_x, pixel_y);
         T approx_x, approx_y;
         interp_lut_dispatch(
             interpolation_mode,
             lut_xy_grid,
-            Wgrid,
-            Hgrid,
+            grid_width,
+            grid_height,
             grid_x_min,
             grid_y_min,
             grid_scale_x,
             grid_scale_y,
-            px,
-            py,
+            pixel_x,
+            pixel_y,
             approx_x,
             approx_y
         );
-        // sin²(angle) between rays (nx, ny, 1) and (approx_x, approx_y, 1):
+        // sin²(angle) between rays (normalized_x, normalized_y, 1) and
+        // (approx_x, approx_y, 1):
         //   sin²(θ) = ‖cross‖² / (‖r1‖² · ‖r2‖²)
-        // cross((nx, ny, 1), (approx_x, approx_y, 1)) =
-        //   (ny - approx_y, approx_x - nx, nx*approx_y - ny*approx_x).
-        const T cross_x = ny - approx_y;
-        const T cross_y = approx_x - nx;
-        const T cross_z = nx * approx_y - ny * approx_x;
+        // cross((normalized_x, normalized_y, 1), (approx_x, approx_y, 1)) =
+        //   (normalized_y - approx_y, approx_x - normalized_x,
+        //   normalized_x*approx_y - normalized_y*approx_x).
+        const T cross_x = normalized_y - approx_y;
+        const T cross_y = approx_x - normalized_x;
+        const T cross_z = normalized_x * approx_y - normalized_y * approx_x;
         const T cross_norm_sq =
             cross_x * cross_x + cross_y * cross_y + cross_z * cross_z;
-        const T n_norm_sq = nx * nx + ny * ny + T(1.0);
+        const T n_norm_sq =
+            normalized_x * normalized_x + normalized_y * normalized_y + T(1.0);
         const T approx_norm_sq =
             approx_x * approx_x + approx_y * approx_y + T(1.0);
         const T sin_sq = cross_norm_sq / (n_norm_sq * approx_norm_sq);
-        const T pen =
-            penalty_outside_cell(px, py, cell_x0, cell_x1, cell_y0, cell_y1);
+        const T pen = penalty_outside_cell(
+            pixel_x,
+            pixel_y,
+            cell_x0,
+            cell_x1,
+            cell_y0,
+            cell_y1
+        );
         return sin_sq - T(kPenaltyLambda) * pen;
     }
 
     // Gradient ascent from a single initial point in normalised space.
-    // Returns the final (nx, ny) and objective value via out parameters.
-    // No bbox clamp on the search — the corner-bbox is an approximation of
-    // the cell's image in normalised space and can be too tight for highly
-    // nonlinear models. The ReLU penalty inside `eval` enforces the true
-    // constraint (project(n) ∈ pixel cell).
+    // Returns the final (normalized_x, normalized_y) and objective value via
+    // out parameters. No bbox clamp on the search — the corner-bbox is an
+    // approximation of the cell's image in normalised space and can be too
+    // tight for highly nonlinear models. The ReLU penalty inside `eval`
+    // enforces the true constraint (project(n) ∈ pixel cell).
     void optimize_from(
         double cell_x0,
         double cell_x1,
         double cell_y0,
         double cell_y1,
         double n_span,
-        double init_nx,
-        double init_ny,
-        double& out_nx,
-        double& out_ny,
+        double init_normalized_x,
+        double init_normalized_y,
+        double& out_normalized_x,
+        double& out_normalized_y,
         double& out_f
     ) const {
-        double nx = init_nx;
-        double ny = init_ny;
+        double normalized_x = init_normalized_x;
+        double normalized_y = init_normalized_y;
         double step_size = std::max(n_span * 0.25, 1.0e-12);
         const double min_step = std::max(n_span * kMinStepRatio, 1.0e-30);
 
-        double current_f =
-            eval<double>(nx, ny, cell_x0, cell_x1, cell_y0, cell_y1);
+        double current_f = eval<double>(
+            normalized_x,
+            normalized_y,
+            cell_x0,
+            cell_x1,
+            cell_y0,
+            cell_y1
+        );
 
         for (int iter = 0; iter < max_iters; ++iter) {
-            Jet2 jnx(nx, 0);
-            Jet2 jny(ny, 1);
-            const Jet2 f =
-                eval<Jet2>(jnx, jny, cell_x0, cell_x1, cell_y0, cell_y1);
+            Jet2 jet_normalized_x(normalized_x, 0);
+            Jet2 jet_normalized_y(normalized_y, 1);
+            const Jet2 f = eval<Jet2>(
+                jet_normalized_x,
+                jet_normalized_y,
+                cell_x0,
+                cell_x1,
+                cell_y0,
+                cell_y1
+            );
 
             const double gx = f.v[0];
             const double gy = f.v[1];
@@ -533,19 +552,19 @@ struct CellMaximizer {
             double step = step_size;
             bool accepted = false;
             for (int ls = 0; ls < kMaxLineSearchSteps; ++ls) {
-                const double trial_nx = nx + step * dir_x;
-                const double trial_ny = ny + step * dir_y;
+                const double trial_normalized_x = normalized_x + step * dir_x;
+                const double trial_normalized_y = normalized_y + step * dir_y;
                 const double trial_f = eval<double>(
-                    trial_nx,
-                    trial_ny,
+                    trial_normalized_x,
+                    trial_normalized_y,
                     cell_x0,
                     cell_x1,
                     cell_y0,
                     cell_y1
                 );
                 if (trial_f > current_f) {
-                    nx = trial_nx;
-                    ny = trial_ny;
+                    normalized_x = trial_normalized_x;
+                    normalized_y = trial_normalized_y;
                     current_f = trial_f;
                     step_size = step * kStepGrowth;
                     accepted = true;
@@ -561,8 +580,8 @@ struct CellMaximizer {
             }
         }
 
-        out_nx = nx;
-        out_ny = ny;
+        out_normalized_x = normalized_x;
+        out_normalized_y = normalized_y;
         out_f = current_f;
     }
 
@@ -612,12 +631,12 @@ struct CellMaximizer {
         const int max_seeds_per_dim = std::max(n_seeds_x, n_seeds_y);
         const double per_seed_n_span = n_span_full / max_seeds_per_dim;
 
-        double best_nx = 0.5 * (n_lo_x + n_hi_x);
-        double best_ny = 0.5 * (n_lo_y + n_hi_y);
+        double best_normalized_x = 0.5 * (n_lo_x + n_hi_x);
+        double best_normalized_y = 0.5 * (n_lo_y + n_hi_y);
         double best_f = -std::numeric_limits<double>::infinity();
         for (int j = 0; j < n_seeds_y; ++j) {
-            const double t = (static_cast<double>(j) + 0.5) /
-                             static_cast<double>(n_seeds_y);
+            const double t =
+                (static_cast<double>(j) + 0.5) / static_cast<double>(n_seeds_y);
             for (int i = 0; i < n_seeds_x; ++i) {
                 const double s = (static_cast<double>(i) + 0.5) /
                                  static_cast<double>(n_seeds_x);
@@ -625,13 +644,13 @@ struct CellMaximizer {
                 const double w10 = s * (1.0 - t);
                 const double w01 = (1.0 - s) * t;
                 const double w11 = s * t;
-                const double init_nx = w00 * n00[0] + w10 * n10[0] +
-                                       w01 * n01[0] + w11 * n11[0];
-                const double init_ny = w00 * n00[1] + w10 * n10[1] +
-                                       w01 * n01[1] + w11 * n11[1];
+                const double init_normalized_x =
+                    w00 * n00[0] + w10 * n10[0] + w01 * n01[0] + w11 * n11[0];
+                const double init_normalized_y =
+                    w00 * n00[1] + w10 * n10[1] + w01 * n01[1] + w11 * n11[1];
 
-                double trial_nx = 0.0;
-                double trial_ny = 0.0;
+                double trial_normalized_x = 0.0;
+                double trial_normalized_y = 0.0;
                 double trial_f = 0.0;
                 optimize_from(
                     cell_x0,
@@ -639,41 +658,46 @@ struct CellMaximizer {
                     cell_y0,
                     cell_y1,
                     per_seed_n_span,
-                    init_nx,
-                    init_ny,
-                    trial_nx,
-                    trial_ny,
+                    init_normalized_x,
+                    init_normalized_y,
+                    trial_normalized_x,
+                    trial_normalized_y,
                     trial_f
                 );
                 if (trial_f > best_f) {
                     best_f = trial_f;
-                    best_nx = trial_nx;
-                    best_ny = trial_ny;
+                    best_normalized_x = trial_normalized_x;
+                    best_normalized_y = trial_normalized_y;
                 }
             }
         }
 
-        double peak_px, peak_py;
-        project(best_nx, best_ny, peak_px, peak_py);
+        double peak_pixel_x, peak_pixel_y;
+        project(
+            best_normalized_x,
+            best_normalized_y,
+            peak_pixel_x,
+            peak_pixel_y
+        );
         double approx_x, approx_y;
         interp_lut_dispatch<double>(
             interpolation_mode,
             lut_xy_grid,
-            Wgrid,
-            Hgrid,
+            grid_width,
+            grid_height,
             grid_x_min,
             grid_y_min,
             grid_scale_x,
             grid_scale_y,
-            peak_px,
-            peak_py,
+            peak_pixel_x,
+            peak_pixel_y,
             approx_x,
             approx_y
         );
-        out_peak_pixel_x = peak_px;
-        out_peak_pixel_y = peak_py;
-        out_exact_x = best_nx;
-        out_exact_y = best_ny;
+        out_peak_pixel_x = peak_pixel_x;
+        out_peak_pixel_y = peak_pixel_y;
+        out_exact_x = best_normalized_x;
+        out_exact_y = best_normalized_y;
         out_approx_x = approx_x;
         out_approx_y = approx_y;
     }
@@ -683,8 +707,8 @@ template <typename Project>
 py::array_t<double> run_max_cell_errors(
     const Project& project,
     const double* lut_xy_grid,
-    int Wgrid,
-    int Hgrid,
+    int grid_width,
+    int grid_height,
     double grid_x_min,
     double grid_x_max,
     double grid_y_min,
@@ -693,7 +717,10 @@ py::array_t<double> run_max_cell_errors(
     int max_iters,
     double grad_tol
 ) {
-    require(Wgrid >= 2 && Hgrid >= 2, "LUT grid dimensions must be at least 2");
+    require(
+        grid_width >= 2 && grid_height >= 2,
+        "LUT grid dimensions must be at least 2"
+    );
     require(
         interpolation_mode >= 0 && interpolation_mode <= 2,
         "interpolation_mode must be 0 (nearest), 1 (bilinear), or 2 (bicubic)"
@@ -701,14 +728,12 @@ py::array_t<double> run_max_cell_errors(
     require(max_iters > 0, "max_iters must be positive");
 
     const double grid_scale_x =
-        Wgrid > 1 ? static_cast<double>(Wgrid - 1) / (grid_x_max - grid_x_min)
-                  : 0.0;
+        static_cast<double>(grid_width - 1) / (grid_x_max - grid_x_min);
     const double grid_scale_y =
-        Hgrid > 1 ? static_cast<double>(Hgrid - 1) / (grid_y_max - grid_y_min)
-                  : 0.0;
+        static_cast<double>(grid_height - 1) / (grid_y_max - grid_y_min);
 
-    const int num_cells_x = Wgrid - 1;
-    const int num_cells_y = Hgrid - 1;
+    const int num_cells_x = grid_width - 1;
+    const int num_cells_y = grid_height - 1;
     const ssize_t num_cells =
         static_cast<ssize_t>(num_cells_x) * static_cast<ssize_t>(num_cells_y);
 
@@ -720,8 +745,8 @@ py::array_t<double> run_max_cell_errors(
         project,
         interpolation_mode,
         lut_xy_grid,
-        Wgrid,
-        Hgrid,
+        grid_width,
+        grid_height,
         grid_x_min,
         grid_y_min,
         grid_scale_x,
@@ -731,13 +756,13 @@ py::array_t<double> run_max_cell_errors(
     };
 
     const double pixel_span_x =
-        Wgrid > 1 ? (grid_x_max - grid_x_min) / static_cast<double>(Wgrid - 1)
-                  : 0.0;
+        (grid_x_max - grid_x_min) / static_cast<double>(grid_width - 1);
     const double pixel_span_y =
-        Hgrid > 1 ? (grid_y_max - grid_y_min) / static_cast<double>(Hgrid - 1)
-                  : 0.0;
+        (grid_y_max - grid_y_min) / static_cast<double>(grid_height - 1);
 
-#pragma omp parallel for schedule(static) collapse(2)
+    // clang-format off
+    #pragma omp parallel for schedule(static) collapse(2)
+    // clang-format on
     for (int cy = 0; cy < num_cells_y; ++cy) {
         for (int cx = 0; cx < num_cells_x; ++cx) {
             const ssize_t cell_idx =
@@ -748,14 +773,14 @@ py::array_t<double> run_max_cell_errors(
             const double cell_y0 = grid_y_min + cy * pixel_span_y;
             const double cell_y1 = grid_y_min + (cy + 1) * pixel_span_y;
 
-            const double* n00 = lut_xy_grid + (cy * Wgrid + cx) * 2;
-            const double* n10 = lut_xy_grid + (cy * Wgrid + (cx + 1)) * 2;
-            const double* n01 = lut_xy_grid + ((cy + 1) * Wgrid + cx) * 2;
+            const double* n00 = lut_xy_grid + (cy * grid_width + cx) * 2;
+            const double* n10 = lut_xy_grid + (cy * grid_width + (cx + 1)) * 2;
+            const double* n01 = lut_xy_grid + ((cy + 1) * grid_width + cx) * 2;
             const double* n11 =
-                lut_xy_grid + ((cy + 1) * Wgrid + (cx + 1)) * 2;
+                lut_xy_grid + ((cy + 1) * grid_width + (cx + 1)) * 2;
 
-            double peak_px = 0.5 * (cell_x0 + cell_x1);
-            double peak_py = 0.5 * (cell_y0 + cell_y1);
+            double peak_pixel_x = 0.5 * (cell_x0 + cell_x1);
+            double peak_pixel_y = 0.5 * (cell_y0 + cell_y1);
             double exact_x = 0.0;
             double exact_y = 0.0;
             double approx_x = 0.0;
@@ -769,8 +794,8 @@ py::array_t<double> run_max_cell_errors(
                 n10,
                 n01,
                 n11,
-                peak_px,
-                peak_py,
+                peak_pixel_x,
+                peak_pixel_y,
                 exact_x,
                 exact_y,
                 approx_x,
@@ -778,8 +803,8 @@ py::array_t<double> run_max_cell_errors(
             );
 
             double* row = O + cell_idx * 6;
-            row[0] = peak_px;
-            row[1] = peak_py;
+            row[0] = peak_pixel_x;
+            row[1] = peak_pixel_y;
             row[2] = exact_x;
             row[3] = exact_y;
             row[4] = approx_x;
@@ -825,37 +850,39 @@ py::array_t<double> max_cell_errors_pinhole_splined(
     auto lutb = lut_xy_grid.request();
     require(
         lutb.ndim == 3 && lutb.shape[2] == 2,
-        "lut_xy_grid must have shape (Hgrid, Wgrid, 2)"
+        "lut_xy_grid must have shape (grid_height, grid_width, 2)"
     );
-    const int Hgrid = static_cast<int>(lutb.shape[0]);
-    const int Wgrid = static_cast<int>(lutb.shape[1]);
+    const int grid_height = static_cast<int>(lutb.shape[0]);
+    const int grid_width = static_cast<int>(lutb.shape[1]);
 
-    const double* pinhole_params =
-        static_cast<const double*>(pinhole_buf.ptr);
+    const double* pinhole_params = static_cast<const double*>(pinhole_buf.ptr);
     const double* dx_grid_ptr = static_cast<const double*>(dxb.ptr);
     const double* dy_grid_ptr = static_cast<const double*>(dyb.ptr);
     const double* lut_ptr = static_cast<const double*>(lutb.ptr);
 
     const SplineMap map(config);
 
-    auto project = [&](auto&& nx, auto&& ny, auto& px, auto& py) {
+    auto project = [&](auto&& normalized_x,
+                       auto&& normalized_y,
+                       auto& pixel_x,
+                       auto& pixel_y) {
         project_pinhole_splined_n(
             map,
             pinhole_params,
             dx_grid_ptr,
             dy_grid_ptr,
-            nx,
-            ny,
-            px,
-            py
+            normalized_x,
+            normalized_y,
+            pixel_x,
+            pixel_y
         );
     };
 
     return run_max_cell_errors(
         project,
         lut_ptr,
-        Wgrid,
-        Hgrid,
+        grid_width,
+        grid_height,
         grid_x_min,
         grid_x_max,
         grid_y_min,
@@ -886,23 +913,32 @@ py::array_t<double> max_cell_errors_opencv(
     auto lutb = lut_xy_grid.request();
     require(
         lutb.ndim == 3 && lutb.shape[2] == 2,
-        "lut_xy_grid must have shape (Hgrid, Wgrid, 2)"
+        "lut_xy_grid must have shape (grid_height, grid_width, 2)"
     );
-    const int Hgrid = static_cast<int>(lutb.shape[0]);
-    const int Wgrid = static_cast<int>(lutb.shape[1]);
+    const int grid_height = static_cast<int>(lutb.shape[0]);
+    const int grid_width = static_cast<int>(lutb.shape[1]);
 
     const double* intr_ptr = static_cast<const double*>(intr_buf.ptr);
     const double* lut_ptr = static_cast<const double*>(lutb.ptr);
 
-    auto project = [&](auto&& nx, auto&& ny, auto& px, auto& py) {
-        project_opencv_n(intr_ptr, nx, ny, px, py);
+    auto project = [&](auto&& normalized_x,
+                       auto&& normalized_y,
+                       auto& pixel_x,
+                       auto& pixel_y) {
+        project_opencv_n(
+            intr_ptr,
+            normalized_x,
+            normalized_y,
+            pixel_x,
+            pixel_y
+        );
     };
 
     return run_max_cell_errors(
         project,
         lut_ptr,
-        Wgrid,
-        Hgrid,
+        grid_width,
+        grid_height,
         grid_x_min,
         grid_x_max,
         grid_y_min,

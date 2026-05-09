@@ -184,24 +184,24 @@ class SeedGrid {
 // ---------------------------------------------------------------------------
 
 static bool idw_interp_from_nn(
-    double px,
-    double py,
+    double pixel_x,
+    double pixel_y,
     int nearest_idx,
     int seed_w,
     int seed_h,
     const double* seed_pixels,
     const double* seed_normals,
-    double& nx_out,
-    double& ny_out
+    double& normalized_x_out,
+    double& normalized_y_out
 ) {
     int ni = nearest_idx % seed_w;
     int nj = nearest_idx / seed_w;
-    double nn_px = seed_pixels[nearest_idx * 2];
-    double nn_py = seed_pixels[nearest_idx * 2 + 1];
+    double nearest_pixel_x = seed_pixels[nearest_idx * 2];
+    double nearest_pixel_y = seed_pixels[nearest_idx * 2 + 1];
 
     // Pick the quad based on which side of the NN the query falls
-    int i0 = (px >= nn_px) ? ni : ni - 1;
-    int j0 = (py >= nn_py) ? nj : nj - 1;
+    int i0 = (pixel_x >= nearest_pixel_x) ? ni : ni - 1;
+    int j0 = (pixel_y >= nearest_pixel_y) ? nj : nj - 1;
     // Clamp to valid quad range
     i0 = std::max(0, std::min(seed_w - 2, i0));
     j0 = std::max(0, std::min(seed_h - 2, j0));
@@ -226,7 +226,7 @@ static bool idw_interp_from_nn(
     const double* p01 = &seed_pixels[idx[2] * 2];
     double ex = p10[0] - p00[0], ey = p10[1] - p00[1];
     double fx = p01[0] - p00[0], fy = p01[1] - p00[1];
-    double qx = px - p00[0], qy = py - p00[1];
+    double qx = pixel_x - p00[0], qy = pixel_y - p00[1];
 
     double det = ex * fy - fx * ey;
     if (std::abs(det) < 1e-30) {
@@ -241,9 +241,9 @@ static bool idw_interp_from_nn(
     const double* n10 = &seed_normals[idx[1] * 2];
     const double* n01 = &seed_normals[idx[2] * 2];
     const double* n11 = &seed_normals[idx[3] * 2];
-    nx_out =
+    normalized_x_out =
         mu * mv * n00[0] + u * mv * n10[0] + mu * v * n01[0] + u * v * n11[0];
-    ny_out =
+    normalized_y_out =
         mu * mv * n00[1] + u * mv * n10[1] + mu * v * n01[1] + u * v * n11[1];
     return true;
 }
@@ -252,35 +252,35 @@ static bool idw_interp_from_nn(
 // Newton refinement: generic 2D solver using Ceres Jet autodiff.
 // ---------------------------------------------------------------------------
 
-// Forward-project (nx, ny) -> (px, py) for the OpenCV model.
+// Forward-project (normalized_x, normalized_y) -> (pixel_x, pixel_y) for the OpenCV model.
 template <typename T>
 static inline void forward_opencv(
-    const T& nx,
-    const T& ny,
+    const T& normalized_x,
+    const T& normalized_y,
     const T* intrinsics,  // fx, fy, cx, cy, dist[14]
-    T& px,
-    T& py
+    T& pixel_x,
+    T& pixel_y
 ) {
-    Vec3<T> point(nx, ny, T(1));
+    Vec3<T> point(normalized_x, normalized_y, T(1));
     Vec2<T> result;
     project_opencv(intrinsics, point, result);
-    px = result[0];
-    py = result[1];
+    pixel_x = result[0];
+    pixel_y = result[1];
 }
 
-// Forward-project (nx, ny) -> (px, py) for the pinhole-splined model.
+// Forward-project (normalized_x, normalized_y) -> (pixel_x, pixel_y) for the pinhole-splined model.
 template <typename T>
 static inline void forward_splined(
-    const T& nx,
-    const T& ny,
+    const T& normalized_x,
+    const T& normalized_y,
     PinholeSplinedConfig* config,
     const T* pinhole_params,
     const T* dx_grid,
     const T* dy_grid,
-    T& px,
-    T& py
+    T& pixel_x,
+    T& pixel_y
 ) {
-    Vec3<T> point(nx, ny, T(1));
+    Vec3<T> point(normalized_x, normalized_y, T(1));
     Vec2<T> result;
     project_pinhole_splined(
         config,
@@ -290,49 +290,49 @@ static inline void forward_splined(
         point,
         result
     );
-    px = result[0];
-    py = result[1];
+    pixel_x = result[0];
+    pixel_y = result[1];
 }
 
-// Newton refinement for OpenCV model, starting from initial guess (nx, ny).
+// Newton refinement for OpenCV model, starting from initial guess (normalized_x, normalized_y).
 static void refine_opencv(
     double target_u,
     double target_v,
-    double& nx,
-    double& ny,
+    double& normalized_x,
+    double& normalized_y,
     const double* intrinsics  // fx, fy, cx, cy, dist[14]
 ) {
     using Jet = ceres::Jet<double, 2>;
     constexpr int max_iter = 20;
     constexpr double tol_sq = 1e-14;
 
-    // Convert intrinsics to Jet constants (only nx, ny are variables)
+    // Convert intrinsics to Jet constants (only normalized_x, normalized_y are variables)
     std::array<Jet, 18> jintrinsics;
     for (int i = 0; i < 18; i++) {
         jintrinsics[i] = Jet(intrinsics[i]);
     }
 
     for (int iter = 0; iter < max_iter; iter++) {
-        Jet jnx(nx, 0);
-        Jet jny(ny, 1);
-        Jet jpx, jpy;
-        forward_opencv(jnx, jny, jintrinsics.data(), jpx, jpy);
+        Jet jet_normalized_x(normalized_x, 0);
+        Jet jet_normalized_y(normalized_y, 1);
+        Jet jet_pixel_x, jet_pixel_y;
+        forward_opencv(jet_normalized_x, jet_normalized_y, jintrinsics.data(), jet_pixel_x, jet_pixel_y);
 
-        double r0 = jpx.a - target_u;
-        double r1 = jpy.a - target_v;
+        double r0 = jet_pixel_x.a - target_u;
+        double r1 = jet_pixel_y.a - target_v;
         if (r0 * r0 + r1 * r1 < tol_sq) {
             break;
         }
 
-        double J00 = jpx.v[0], J01 = jpx.v[1];
-        double J10 = jpy.v[0], J11 = jpy.v[1];
+        double J00 = jet_pixel_x.v[0], J01 = jet_pixel_x.v[1];
+        double J10 = jet_pixel_y.v[0], J11 = jet_pixel_y.v[1];
         double det = J00 * J11 - J01 * J10;
         if (std::abs(det) < 1e-30) {
             break;
         }
         double inv = 1.0 / det;
-        nx -= inv * (J11 * r0 - J01 * r1);
-        ny -= inv * (-J10 * r0 + J00 * r1);
+        normalized_x -= inv * (J11 * r0 - J01 * r1);
+        normalized_y -= inv * (-J10 * r0 + J00 * r1);
     }
 }
 
@@ -364,8 +364,8 @@ struct SplineConstants {
 static void refine_splined(
     double target_u,
     double target_v,
-    double& nx,
-    double& ny,
+    double& normalized_x,
+    double& normalized_y,
     const SplineConstants& sc,
     const double* dx_grid,
     const double* dy_grid,
@@ -389,7 +389,7 @@ static void refine_splined(
     for (int rebuild = 0; rebuild < max_rebuilds; rebuild++) {
         rebuild_count++;
         double sx, sy;
-        normalized_to_stereographic(nx, ny, sx, sy);
+        normalized_to_stereographic(normalized_x, normalized_y, sx, sy);
         double gx = std::max(
             0.0,
             std::min(1.0 + (sx + half_x) * x_scale, Nx - 1.0 - eps)
@@ -415,10 +415,10 @@ static void refine_splined(
 
         for (int iter = 0; iter < max_newton; iter++) {
             iter_count++;
-            Jet jnx(nx, 0);
-            Jet jny(ny, 1);
+            Jet jet_normalized_x(normalized_x, 0);
+            Jet jet_normalized_y(normalized_y, 1);
             Jet jsx, jsy;
-            normalized_to_stereographic(jnx, jny, jsx, jsy);
+            normalized_to_stereographic(jet_normalized_x, jet_normalized_y, jsx, jsy);
             Jet jgx = clamp_T(
                 Jet(1.0) + (jsx + Jet(half_x)) * Jet(x_scale),
                 Jet(0.0),
@@ -444,8 +444,8 @@ static void refine_splined(
                     ki++;
                 }
             }
-            Jet r0 = Jet(sc.fx) * (jnx + dx_val) + Jet(sc.cx) - Jet(target_u);
-            Jet r1 = Jet(sc.fy) * (jny + dy_val) + Jet(sc.cy) - Jet(target_v);
+            Jet r0 = Jet(sc.fx) * (jet_normalized_x + dx_val) + Jet(sc.cx) - Jet(target_u);
+            Jet r1 = Jet(sc.fy) * (jet_normalized_y + dy_val) + Jet(sc.cy) - Jet(target_v);
             double res0 = r0.a, res1 = r1.a;
             if (res0 * res0 + res1 * res1 < tol_sq) {
                 break;
@@ -457,11 +457,11 @@ static void refine_splined(
                 break;
             }
             double inv = 1.0 / det;
-            nx -= inv * (J11 * res0 - J01 * res1);
-            ny -= inv * (-J10 * res0 + J00 * res1);
+            normalized_x -= inv * (J11 * res0 - J01 * res1);
+            normalized_y -= inv * (-J10 * res0 + J00 * res1);
         }
 
-        normalized_to_stereographic(nx, ny, sx, sy);
+        normalized_to_stereographic(normalized_x, normalized_y, sx, sy);
         gx = std::max(
             0.0,
             std::min(1.0 + (sx + half_x) * x_scale, Nx - 1.0 - eps)
@@ -532,40 +532,42 @@ py::array_t<double> run_seeded_normalize(
 
     py::gil_scoped_release release;
 
-#pragma omp parallel for schedule(static)
+    // clang-format off
+    #pragma omp parallel for schedule(static)
+    // clang-format on
     for (ssize_t i = 0; i < N; i++) {
-        double px = QP[i * 2];
-        double py_val = QP[i * 2 + 1];
+        double pixel_x = QP[i * 2];
+        double pixel_y_val = QP[i * 2 + 1];
 
-        double nx = (px - cx) / fx;
-        double ny = (py_val - cy) / fy;
+        double normalized_x = (pixel_x - cx) / fx;
+        double normalized_y = (pixel_y_val - cy) / fy;
 
-        int nearest = grid.nearest(px, py_val, SP);
+        int nearest = grid.nearest(pixel_x, pixel_y_val, SP);
         if (nearest >= 0) {
-            double interp_nx, interp_ny;
+            double interp_normalized_x, interp_normalized_y;
             if (idw_interp_from_nn(
-                    px,
-                    py_val,
+                    pixel_x,
+                    pixel_y_val,
                     nearest,
                     seed_w,
                     seed_h,
                     SP,
                     SN,
-                    interp_nx,
-                    interp_ny
+                    interp_normalized_x,
+                    interp_normalized_y
                 )) {
-                nx = interp_nx;
-                ny = interp_ny;
+                normalized_x = interp_normalized_x;
+                normalized_y = interp_normalized_y;
             } else {
-                nx = SN[nearest * 2];
-                ny = SN[nearest * 2 + 1];
+                normalized_x = SN[nearest * 2];
+                normalized_y = SN[nearest * 2 + 1];
             }
         }
 
-        refine_one(px, py_val, nx, ny);
+        refine_one(pixel_x, pixel_y_val, normalized_x, normalized_y);
 
-        O[i * 3 + 0] = nx;
-        O[i * 3 + 1] = ny;
+        O[i * 3 + 0] = normalized_x;
+        O[i * 3 + 1] = normalized_y;
         O[i * 3 + 2] = 1.0;
     }
 
@@ -616,8 +618,8 @@ py::array_t<double> seeded_normalize_opencv(
         IP[1],
         IP[2],
         IP[3],
-        [IP](double target_u, double target_v, double& nx, double& ny) {
-            refine_opencv(target_u, target_v, nx, ny, IP);
+        [IP](double target_u, double target_v, double& normalized_x, double& normalized_y) {
+            refine_opencv(target_u, target_v, normalized_x, normalized_y, IP);
         }
     );
 }
@@ -683,8 +685,8 @@ py::array_t<double> seeded_normalize_splined(
         fy,
         cx,
         cy,
-        [&sc, dxp, dyp](double target_u, double target_v, double& nx, double& ny) {
-            refine_splined(target_u, target_v, nx, ny, sc, dxp, dyp);
+        [&sc, dxp, dyp](double target_u, double target_v, double& normalized_x, double& normalized_y) {
+            refine_splined(target_u, target_v, normalized_x, normalized_y, sc, dxp, dyp);
         }
     );
 }
