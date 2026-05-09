@@ -49,14 +49,27 @@ def _random_pixels(
     return np.column_stack([xs, ys])
 
 
+def _per_point_angular_error_deg(
+    reference: np.ndarray,
+    approx: np.ndarray,
+) -> np.ndarray:
+    """Per-point angular error (deg) between two batches of rays of shape (N, 3).
+
+    Uses atan2(‖cross‖, dot) instead of acos(dot/norms) so the answer keeps
+    full precision near zero — acos catastrophically loses digits when its
+    argument is close to 1.
+    """
+    cross = np.cross(reference, approx)
+    cross_norm = np.linalg.norm(cross, axis=1)
+    dot = np.einsum("ij,ij->i", reference, approx)
+    return np.rad2deg(np.arctan2(cross_norm, dot))
+
+
 def _query_error_deg(
     reference: np.ndarray,
     approx: np.ndarray,
 ) -> float:
-    reference_unit = reference / np.linalg.norm(reference, axis=1, keepdims=True)
-    approx_unit = approx / np.linalg.norm(approx, axis=1, keepdims=True)
-    dots = np.einsum("ij,ij->i", reference_unit, approx_unit)
-    return float(np.max(np.rad2deg(np.arccos(np.clip(dots, -1.0, 1.0)))))
+    return float(np.max(_per_point_angular_error_deg(reference, approx)))
 
 
 def test_unproject_lut_save_load_writes_expected_files(tmp_path: Path) -> None:
@@ -140,9 +153,6 @@ def test_unproject_lut_analyzer_can_report_multiple_interpolations() -> None:
     assert np.isfinite(report.max_angular_error_mdeg["nearest"])
     assert np.isfinite(report.max_angular_error_mdeg["bilinear"])
     assert np.isfinite(report.max_angular_error_mdeg["bicubic"])
-    assert np.isfinite(report.median_angular_error_mdeg["nearest"])
-    assert np.isfinite(report.median_angular_error_mdeg["bilinear"])
-    assert np.isfinite(report.median_angular_error_mdeg["bicubic"])
     assert (
         report.max_angular_error_mdeg["bilinear"]
         < report.max_angular_error_mdeg["nearest"]
@@ -159,9 +169,7 @@ def test_unproject_lut_analyzer_accepts_single_interpolation() -> None:
 
     assert report.interpolations == ("bicubic",)
     assert set(report.max_angular_error_mdeg) == {"bicubic"}
-    assert set(report.median_angular_error_mdeg) == {"bicubic"}
     assert np.isfinite(report.max_angular_error_mdeg["bicubic"])
-    assert np.isfinite(report.median_angular_error_mdeg["bicubic"])
 
 
 def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path) -> None:
@@ -186,52 +194,6 @@ def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path)
         assert report_after.max_angular_error_mdeg[mode] == pytest.approx(
             report_before.max_angular_error_mdeg[mode], rel=1e-3
         )
-        assert report_after.median_angular_error_mdeg[mode] == pytest.approx(
-            report_before.median_angular_error_mdeg[mode], rel=1e-3
-        )
-
-
-def test_unproject_lut_analyzer_can_sample_dense_accuracy_grid() -> None:
-    """The analyzer can compare LUT rays against exact rays on a dense sample grid."""
-    from lensboy.analysis import sample_lut_accuracy
-
-    model = _load_opencv_model()
-    lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    sample = sample_lut_accuracy(
-        lut, model, interpolation="bilinear", target_sample_count=2500
-    )
-
-    expected_sample_count = sample.sample_grid_width * sample.sample_grid_height
-    assert sample.interpolation == "bilinear"
-    assert sample.sample_count == expected_sample_count
-    assert sample.sample_pixels.shape == (expected_sample_count, 2)
-    assert sample.exact_rays.shape == (expected_sample_count, 3)
-    assert sample.approx_rays.shape == (expected_sample_count, 3)
-    assert sample.angular_error_deg.shape == (expected_sample_count,)
-    assert np.isfinite(sample.angular_error_deg).all()
-    assert sample.max_angular_error_mdeg == pytest.approx(
-        float(np.max(sample.angular_error_deg) * 1.0e3)
-    )
-    assert sample.mean_angular_error_mdeg == pytest.approx(
-        float(np.mean(sample.angular_error_deg) * 1.0e3)
-    )
-    assert sample.median_angular_error_mdeg == pytest.approx(
-        float(np.median(sample.angular_error_deg) * 1.0e3)
-    )
-
-
-def test_unproject_lut_analyzer_dense_accuracy_grid_is_exact_for_linear_model() -> None:
-    """A linear pinhole LUT matches the exact source model on dense sampled queries."""
-    from lensboy.analysis import sample_lut_accuracy
-
-    model = _make_linear_pinhole_model()
-    lut = model.get_unproject_lut(grid_size_wh=(6, 5))
-    sample = sample_lut_accuracy(
-        lut, model, interpolation="bilinear", target_sample_count=2500
-    )
-
-    np.testing.assert_allclose(sample.approx_rays, sample.exact_rays, atol=1e-5)
-    assert sample.max_angular_error_mdeg < 1e-2
 
 
 def test_unproject_lut_grid_stride_can_be_fractional() -> None:
@@ -308,11 +270,6 @@ def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
 
     assert report.interpolations == ("bilinear",)
     assert np.isfinite(report.max_angular_error_mdeg["bilinear"])
-    assert np.isfinite(report.median_angular_error_mdeg["bilinear"])
-    assert (
-        report.median_angular_error_mdeg["bilinear"]
-        <= report.max_angular_error_mdeg["bilinear"]
-    )
 
     xs = np.linspace(0.0, model.image_width - 1, 35)
     ys = np.linspace(0.0, model.image_height - 1, 27)
@@ -376,6 +333,148 @@ def test_unproject_lut_analyzer_can_save_and_load_error_heatmaps(tmp_path: Path)
     assert loaded.error_delta_xy.shape == (4, 5, 2)
     assert loaded.peak_pixel_xy.shape == (4, 5, 2)
     assert np.max(loaded.max_angular_error_deg) < 2e-6
+
+
+def _heatmap_test_lut(model: lb.OpenCV) -> lb.UnprojectLUT:
+    """Realistic LUT used by the heatmap correctness tests."""
+    return model.get_unproject_lut(pixel_stride=32.0)
+
+
+def test_heatmap_max_matches_analyzer_max() -> None:
+    """compute_lut_error_heatmap and estimate_lut_accuracy agree on the global max."""
+    from lensboy.analysis import compute_lut_error_heatmap, estimate_lut_accuracy
+
+    model = _load_opencv_model()
+    lut = _heatmap_test_lut(model)
+
+    for mode in ("nearest", "bilinear", "bicubic"):
+        heatmap = compute_lut_error_heatmap(lut, model, interpolation=mode)
+        report = estimate_lut_accuracy(lut, model, interpolations=mode)
+
+        heatmap_max_mdeg = float(np.max(heatmap.max_angular_error_deg)) * 1.0e3
+        report_max_mdeg = report.max_angular_error_mdeg[mode]
+        assert heatmap_max_mdeg == pytest.approx(report_max_mdeg, rel=1e-9, abs=1e-9)
+
+
+def test_heatmap_peak_pixel_reproduces_reported_error() -> None:
+    """The reported per-cell peak pixel re-evaluates to the reported angular error."""
+    from lensboy.analysis import compute_lut_error_heatmap
+
+    model = _load_opencv_model()
+    lut = _heatmap_test_lut(model)
+
+    for mode in ("nearest", "bilinear", "bicubic"):
+        heatmap = compute_lut_error_heatmap(lut, model, interpolation=mode)
+        peaks = heatmap.peak_pixel_xy.reshape(-1, 2)
+        exact_rays = model.normalize_points(peaks)
+        approx_rays, _ = lut.normalize_points(peaks, interpolation=mode)
+        actual_deg = _per_point_angular_error_deg(exact_rays, approx_rays)
+        expected_deg = heatmap.max_angular_error_deg.reshape(-1)
+        np.testing.assert_allclose(actual_deg, expected_deg, rtol=1e-7, atol=1e-9)
+
+
+def test_heatmap_peak_pixel_lies_inside_its_cell() -> None:
+    """The optimiser respects the ReLU cell-membership constraint."""
+    from lensboy.analysis import compute_lut_error_heatmap
+
+    model = _load_opencv_model()
+    lut = _heatmap_test_lut(model)
+
+    for mode in ("nearest", "bilinear", "bicubic"):
+        heatmap = compute_lut_error_heatmap(lut, model, interpolation=mode)
+        x_edges = heatmap.cell_x_edges
+        y_edges = heatmap.cell_y_edges
+        peak_x = heatmap.peak_pixel_xy[..., 0]
+        peak_y = heatmap.peak_pixel_xy[..., 1]
+        x_lo = x_edges[:-1][None, :]
+        x_hi = x_edges[1:][None, :]
+        y_lo = y_edges[:-1][:, None]
+        y_hi = y_edges[1:][:, None]
+        eps = 1e-9
+        assert np.all(peak_x >= x_lo - eps)
+        assert np.all(peak_x <= x_hi + eps)
+        assert np.all(peak_y >= y_lo - eps)
+        assert np.all(peak_y <= y_hi + eps)
+
+
+def test_heatmap_error_delta_matches_approx_minus_exact_at_peak() -> None:
+    """error_delta_xy equals (approx_xy − exact_xy) at the reported peak pixel."""
+    from lensboy.analysis import compute_lut_error_heatmap
+
+    model = _load_opencv_model()
+    lut = _heatmap_test_lut(model)
+
+    for mode in ("nearest", "bilinear", "bicubic"):
+        heatmap = compute_lut_error_heatmap(lut, model, interpolation=mode)
+        peaks = heatmap.peak_pixel_xy.reshape(-1, 2)
+        exact_xy = model.normalize_points(peaks)[:, :2]
+        approx_xy, _ = lut.normalize_points(peaks, interpolation=mode)
+        expected_delta = (approx_xy[:, :2] - exact_xy).reshape(
+            heatmap.error_delta_xy.shape
+        )
+        np.testing.assert_allclose(
+            heatmap.error_delta_xy, expected_delta, rtol=1e-7, atol=1e-9
+        )
+
+
+def test_heatmap_per_cell_max_matches_dense_brute_force() -> None:
+    """Per-cell optimiser maxima match a dense brute-force search inside each cell.
+
+    For a realistic LUT and a non-trivially distorted model, brute-force a
+    sample of cells with a dense grid of pixels and compare the per-cell
+    angular-error max to what the optimiser reported. The optimiser must
+    reach at least the brute-force max, and on a 25x25 brute grid the gap
+    to the true peak should be very small.
+    """
+    from lensboy.analysis import compute_lut_error_heatmap
+
+    model = _load_opencv_model()
+    lut = _heatmap_test_lut(model)
+    samples_per_axis = 25
+    n_cells_to_check = 50
+    interpolation = "bilinear"
+
+    heatmap = compute_lut_error_heatmap(lut, model, interpolation=interpolation)
+    x_edges = heatmap.cell_x_edges
+    y_edges = heatmap.cell_y_edges
+    height, width = heatmap.max_angular_error_deg.shape
+
+    rng = np.random.default_rng(0)
+    sample_iy = rng.integers(0, height, size=n_cells_to_check)
+    sample_ix = rng.integers(0, width, size=n_cells_to_check)
+
+    for iy, ix in zip(sample_iy, sample_ix, strict=True):
+        xs = np.linspace(x_edges[ix], x_edges[ix + 1], samples_per_axis)
+        ys = np.linspace(y_edges[iy], y_edges[iy + 1], samples_per_axis)
+        gx, gy = np.meshgrid(xs, ys, indexing="xy")
+        pixels = np.column_stack([gx.ravel(), gy.ravel()])
+
+        exact_rays = model.normalize_points(pixels)
+        approx_rays, _ = lut.normalize_points(pixels, interpolation=interpolation)
+        brute_max_deg = _query_error_deg(exact_rays, approx_rays)
+        heatmap_max_deg = float(heatmap.max_angular_error_deg[iy, ix])
+
+        # Optimiser must reach at least the brute-force max (within tight
+        # numerical slop). With a 25x25 brute grid the gap to the true peak
+        # is small in absolute terms.
+        assert heatmap_max_deg >= brute_max_deg - 1e-9, (
+            f"cell ({iy},{ix}): heatmap={heatmap_max_deg}  brute={brute_max_deg}"
+        )
+        assert heatmap_max_deg <= brute_max_deg + 1e-5, (
+            f"cell ({iy},{ix}): heatmap={heatmap_max_deg}  brute={brute_max_deg}"
+        )
+
+
+def test_heatmap_is_essentially_zero_for_linear_pinhole() -> None:
+    """Bilinear and bicubic interpolation match a linear pinhole exactly."""
+    from lensboy.analysis import compute_lut_error_heatmap
+
+    model = _make_linear_pinhole_model()
+    lut = model.get_unproject_lut(grid_size_wh=(6, 5))
+
+    for mode in ("bilinear", "bicubic"):
+        heatmap = compute_lut_error_heatmap(lut, model, interpolation=mode)
+        assert np.max(heatmap.max_angular_error_deg) < 1e-6
 
 
 def test_plot_unproject_lut_error_heatmap_supports_angular_units(tmp_path: Path) -> None:

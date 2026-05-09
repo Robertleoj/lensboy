@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <spdlog/spdlog.h>
+#include "./lut_max_cell_error.hpp"
 #include "./python_camera_functions.hpp"
 #include "./seeded_normalize.hpp"
 #include "calibrate.hpp"
@@ -261,6 +262,35 @@ PYBIND11_MODULE(
         py::arg("query_pixels"),
         py::arg("config"),
         py::arg("intrinsics")
+    );
+
+    m.def(
+        "max_cell_errors_pinhole_splined",
+        &lensboy::max_cell_errors_pinhole_splined,
+        py::arg("config"),
+        py::arg("intrinsics"),
+        py::arg("lut_xy_grid"),
+        py::arg("grid_x_min"),
+        py::arg("grid_x_max"),
+        py::arg("grid_y_min"),
+        py::arg("grid_y_max"),
+        py::arg("interpolation_mode"),
+        py::arg("max_iters"),
+        py::arg("grad_tol")
+    );
+
+    m.def(
+        "max_cell_errors_opencv",
+        &lensboy::max_cell_errors_opencv,
+        py::arg("intrinsics"),
+        py::arg("lut_xy_grid"),
+        py::arg("grid_x_min"),
+        py::arg("grid_x_max"),
+        py::arg("grid_y_min"),
+        py::arg("grid_y_max"),
+        py::arg("interpolation_mode"),
+        py::arg("max_iters"),
+        py::arg("grad_tol")
     );
 
     m.def(

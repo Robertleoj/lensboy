@@ -10,10 +10,8 @@ try:
     from lensboy.analysis.unproject_lut import (
         UnprojectLUTAccuracyReport,
         UnprojectLUTErrorHeatmap,
-        UnprojectLUTSampleAccuracy,
         compute_lut_error_heatmap,
         estimate_lut_accuracy,
-        sample_lut_accuracy,
     )
 except ImportError as e:
     raise ImportError(
@@ -24,7 +22,6 @@ except ImportError as e:
 __all__ = [
     "UnprojectLUTAccuracyReport",
     "UnprojectLUTErrorHeatmap",
-    "UnprojectLUTSampleAccuracy",
     "compute_lut_error_heatmap",
     "draw_points",
     "estimate_lut_accuracy",
@@ -33,5 +30,4 @@ __all__ = [
     "plot_projection_diff",
     "plot_undistortion",
     "plot_unproject_lut_error_heatmap",
-    "sample_lut_accuracy",
 ]

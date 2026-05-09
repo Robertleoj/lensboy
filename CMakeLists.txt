@@ -46,6 +46,7 @@ pybind11_add_module(
     cpp_src/pinhole_splined_fine_tune.cpp
     cpp_src/normalize_pinhole_splined.cpp
     cpp_src/seeded_normalize.cpp
+    cpp_src/lut_max_cell_error.cpp
 )
 
 target_compile_definitions(lensboy_bindings

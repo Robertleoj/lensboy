@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from lensboy import lensboy_bindings as lbb
-
 if TYPE_CHECKING:
     from lensboy.camera_models.base_model import CameraModel
     from lensboy.camera_models.opencv import OpenCV
@@ -155,13 +153,16 @@ def _sample_xy_grid_seeded(
     Returns:
         Sampled xy grid, shape ``(grid_height, grid_width, 2)``.
     """
-    from lensboy.camera_models.opencv import OpenCV
-    from lensboy.camera_models.pinhole_splined import PinholeSplined
+    try:
+        seeded_normalize = camera_model._seeded_normalize  # type: ignore[attr-defined]
+    except AttributeError as exc:
+        raise TypeError(
+            "UnprojectLUT is only supported for OpenCV and PinholeSplined models."
+        ) from exc
 
     grid_width = len(x_coords)
     grid_height = len(y_coords)
 
-    # Build query pixel grid
     gx, gy = np.meshgrid(x_coords, y_coords, indexing="xy")
     query_pixels = np.ascontiguousarray(
         np.column_stack([gx.ravel(), gy.ravel()]), dtype=np.float64
@@ -169,36 +170,9 @@ def _sample_xy_grid_seeded(
 
     seed_pixels, seed_normals, seed_w, seed_h = _compute_seed_grid(camera_model)  # type: ignore[arg-type]
 
-    if isinstance(camera_model, OpenCV):
-        dist = np.asarray(camera_model.distortion_coeffs, dtype=np.float64)
-        if len(dist) < 14:
-            dist = np.pad(dist, (0, 14 - len(dist)))
-        intrinsics = np.concatenate(
-            [
-                np.array(
-                    [camera_model.fx, camera_model.fy, camera_model.cx, camera_model.cy],
-                    dtype=np.float64,
-                ),
-                dist[:14],
-            ]
-        )
-        rays = lbb.seeded_normalize_opencv(
-            seed_pixels, seed_normals, seed_w, seed_h, query_pixels, intrinsics
-        )
-    elif isinstance(camera_model, PinholeSplined):
-        rays = lbb.seeded_normalize_splined(
-            seed_pixels,
-            seed_normals,
-            seed_w,
-            seed_h,
-            query_pixels,
-            camera_model._cpp_config(),
-            camera_model._cpp_params(),
-        )
-    else:
-        raise TypeError(
-            "UnprojectLUT is only supported for OpenCV and PinholeSplined models."
-        )
+    rays = seeded_normalize(
+        seed_pixels, seed_normals, seed_w, seed_h, query_pixels
+    )
 
     xy = np.asarray(rays[:, :2], dtype=np.float64)
     return xy.reshape(grid_height, grid_width, 2)

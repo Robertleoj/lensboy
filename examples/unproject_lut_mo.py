@@ -27,7 +27,6 @@ with app.setup(hide_code=True):
         compute_lut_error_heatmap,
         estimate_lut_accuracy,
         plot_unproject_lut_error_heatmap,
-        sample_lut_accuracy,
     )
 
 
@@ -229,23 +228,12 @@ def _(interpolation_widget):
 
 
 @app.cell(hide_code=True)
-def _(accuracy_report, interpolation_mode, sample_accuracy):
+def _(accuracy_report, interpolation_mode):
     mo.md(f"""
-    ## Accuracy on a dense sample
+    ## Estimated accuracy
 
-    Queried `{sample_accuracy.sample_count}` evenly spaced pixels with
-    `{interpolation_mode}` interpolation.
-
-    - sample grid: `{sample_accuracy.sample_grid_width} x \
-{sample_accuracy.sample_grid_height}`
-    - max observed angular error on this sample: \
-`{sample_accuracy.max_angular_error_mdeg:.3f} mdeg`
-    - mean angular error on this sample: \
-`{sample_accuracy.mean_angular_error_mdeg:.3f} mdeg`
     - analyzer-estimated max for `{interpolation_mode}`: \
 `{accuracy_report.max_angular_error_mdeg[interpolation_mode]:.3f} mdeg`
-    - analyzer-estimated median for `{interpolation_mode}`: \
-`{accuracy_report.median_angular_error_mdeg[interpolation_mode]:.3f} mdeg`
     """)
     return
 
@@ -255,10 +243,7 @@ def _(loaded, model, interpolation_mode):
     accuracy_report = estimate_lut_accuracy(
         loaded, model, interpolations=interpolation_mode
     )
-    sample_accuracy = sample_lut_accuracy(
-        loaded, model, interpolation=interpolation_mode, target_sample_count=2500
-    )
-    return accuracy_report, sample_accuracy
+    return (accuracy_report,)
 
 
 @app.cell(hide_code=True)

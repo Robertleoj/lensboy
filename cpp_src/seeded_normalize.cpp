@@ -483,22 +483,20 @@ static void refine_splined(
 }
 
 // ---------------------------------------------------------------------------
-// Python-facing entry points.
+// Shared kernel: validation, NN+IDW initial guess, parallel Newton refinement.
+// Per-model parts (intrinsics parsing, residual+jacobian) live in the entry
+// points and the refine_* functions above.
 // ---------------------------------------------------------------------------
 
-py::array_t<double> seeded_normalize_opencv(
-    py::array_t<double, py::array::c_style | py::array::forcecast> seed_pixels,
-    py::array_t<double, py::array::c_style | py::array::forcecast> seed_normals,
-    int seed_w,
-    int seed_h,
-    py::array_t<double, py::array::c_style | py::array::forcecast> query_pixels,
-    py::array_t<double, py::array::c_style | py::array::forcecast> intrinsics
-) {
-    auto sp = seed_pixels.request();
-    auto sn = seed_normals.request();
-    auto qp = query_pixels.request();
-    auto ip = intrinsics.request();
+namespace {
 
+void validate_seeded_inputs(
+    const py::buffer_info& sp,
+    const py::buffer_info& sn,
+    const py::buffer_info& qp,
+    int seed_w,
+    int seed_h
+) {
     require(sp.ndim == 2 && sp.shape[1] == 2, "seed_pixels must be (M, 2)");
     require(sn.ndim == 2 && sn.shape[1] == 2, "seed_normals must be (M, 2)");
     require(
@@ -510,128 +508,25 @@ py::array_t<double> seeded_normalize_opencv(
         "seed length must equal seed_w * seed_h"
     );
     require(qp.ndim == 2 && qp.shape[1] == 2, "query_pixels must be (N, 2)");
-    require(
-        ip.ndim == 1 && ip.shape[0] == 18,
-        "intrinsics must be (18,): fx, fy, cx, cy, dist[14]"
-    );
-
-    const int M = (int)sp.shape[0];
-    const ssize_t N = qp.shape[0];
-    const double* SP = static_cast<const double*>(sp.ptr);
-    const double* SN = static_cast<const double*>(sn.ptr);
-    const double* QP = static_cast<const double*>(qp.ptr);
-    const double* IP = static_cast<const double*>(ip.ptr);
-
-    const double fx = IP[0], fy = IP[1], cx = IP[2], cy = IP[3];
-
-    py::array_t<double> out({N, (ssize_t)3});
-    double* O = static_cast<double*>(out.request().ptr);
-
-    SeedGrid grid(SP, M, seed_w, seed_h);
-
-    py::gil_scoped_release release;
-
-#pragma omp parallel for schedule(static)
-    for (ssize_t i = 0; i < N; i++) {
-        double px = QP[i * 2];
-        double py = QP[i * 2 + 1];
-
-        double nx = (px - cx) / fx;
-        double ny = (py - cy) / fy;
-
-        int nearest = grid.nearest(px, py, SP);
-        if (nearest >= 0) {
-            double interp_nx, interp_ny;
-            if (idw_interp_from_nn(
-                    px,
-                    py,
-                    nearest,
-                    seed_w,
-                    seed_h,
-                    SP,
-                    SN,
-                    interp_nx,
-                    interp_ny
-                )) {
-                nx = interp_nx;
-                ny = interp_ny;
-            } else {
-                nx = SN[nearest * 2];
-                ny = SN[nearest * 2 + 1];
-            }
-        }
-
-        refine_opencv(px, py, nx, ny, IP);
-
-        O[i * 3 + 0] = nx;
-        O[i * 3 + 1] = ny;
-        O[i * 3 + 2] = 1.0;
-    }
-
-    return out;
 }
 
-py::array_t<double> seeded_normalize_splined(
-    py::array_t<double, py::array::c_style | py::array::forcecast> seed_pixels,
-    py::array_t<double, py::array::c_style | py::array::forcecast> seed_normals,
+template <typename Refiner>
+py::array_t<double> run_seeded_normalize(
+    const double* SP,
+    const double* SN,
+    int M,
     int seed_w,
     int seed_h,
-    py::array_t<double, py::array::c_style | py::array::forcecast> query_pixels,
-    PinholeSplinedConfig& config,
-    PinholeSplinedIntrinsicsParameters& params
+    const double* QP,
+    ssize_t N,
+    double fx,
+    double fy,
+    double cx,
+    double cy,
+    Refiner refine_one
 ) {
-    auto sp = seed_pixels.request();
-    auto sn = seed_normals.request();
-    auto qp = query_pixels.request();
-
-    require(sp.ndim == 2 && sp.shape[1] == 2, "seed_pixels must be (M, 2)");
-    require(sn.ndim == 2 && sn.shape[1] == 2, "seed_normals must be (M, 2)");
-    require(
-        sp.shape[0] == sn.shape[0],
-        "seed_pixels and seed_normals must have same length"
-    );
-    require(
-        sp.shape[0] == (ssize_t)(seed_w * seed_h),
-        "seed length must equal seed_w * seed_h"
-    );
-    require(qp.ndim == 2 && qp.shape[1] == 2, "query_pixels must be (N, 2)");
-
-    auto dxb = params.dx_grid.request();
-    auto dyb = params.dy_grid.request();
-    require(
-        (uint32_t)dxb.shape[0] == config.num_knots_y &&
-            (uint32_t)dxb.shape[1] == config.num_knots_x,
-        "dx_grid shape mismatch"
-    );
-    require(
-        (uint32_t)dyb.shape[0] == config.num_knots_y &&
-            (uint32_t)dyb.shape[1] == config.num_knots_x,
-        "dy_grid shape mismatch"
-    );
-
-    auto ppb = params.pinhole_parameters.request();
-    require(
-        ppb.ndim == 1 && ppb.shape[0] == 4,
-        "pinhole_parameters must be (4,)"
-    );
-    const double* pinhole_params = static_cast<const double*>(ppb.ptr);
-    const double fx = pinhole_params[0], fy = pinhole_params[1],
-                 cx = pinhole_params[2], cy = pinhole_params[3];
-    require(fx != 0.0 && fy != 0.0, "fx/fy must be non-zero");
-
-    const double* dxp = static_cast<const double*>(dxb.ptr);
-    const double* dyp = static_cast<const double*>(dyb.ptr);
-
-    const int M = (int)sp.shape[0];
-    const ssize_t N = qp.shape[0];
-    const double* SP = static_cast<const double*>(sp.ptr);
-    const double* SN = static_cast<const double*>(sn.ptr);
-    const double* QP = static_cast<const double*>(qp.ptr);
-
     py::array_t<double> out({N, (ssize_t)3});
     double* O = static_cast<double*>(out.request().ptr);
-
-    SplineConstants sc(&config, pinhole_params);
 
     SeedGrid grid(SP, M, seed_w, seed_h);
 
@@ -667,7 +562,7 @@ py::array_t<double> seeded_normalize_splined(
             }
         }
 
-        refine_splined(px, py_val, nx, ny, sc, dxp, dyp);
+        refine_one(px, py_val, nx, ny);
 
         O[i * 3 + 0] = nx;
         O[i * 3 + 1] = ny;
@@ -675,6 +570,123 @@ py::array_t<double> seeded_normalize_splined(
     }
 
     return out;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Python-facing entry points.
+// ---------------------------------------------------------------------------
+
+py::array_t<double> seeded_normalize_opencv(
+    py::array_t<double, py::array::c_style | py::array::forcecast> seed_pixels,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seed_normals,
+    int seed_w,
+    int seed_h,
+    py::array_t<double, py::array::c_style | py::array::forcecast> query_pixels,
+    py::array_t<double, py::array::c_style | py::array::forcecast> intrinsics
+) {
+    auto sp = seed_pixels.request();
+    auto sn = seed_normals.request();
+    auto qp = query_pixels.request();
+    auto ip = intrinsics.request();
+
+    validate_seeded_inputs(sp, sn, qp, seed_w, seed_h);
+    require(
+        ip.ndim == 1 && ip.shape[0] == 18,
+        "intrinsics must be (18,): fx, fy, cx, cy, dist[14]"
+    );
+
+    const int M = (int)sp.shape[0];
+    const ssize_t N = qp.shape[0];
+    const double* SP = static_cast<const double*>(sp.ptr);
+    const double* SN = static_cast<const double*>(sn.ptr);
+    const double* QP = static_cast<const double*>(qp.ptr);
+    const double* IP = static_cast<const double*>(ip.ptr);
+
+    return run_seeded_normalize(
+        SP,
+        SN,
+        M,
+        seed_w,
+        seed_h,
+        QP,
+        N,
+        IP[0],
+        IP[1],
+        IP[2],
+        IP[3],
+        [IP](double target_u, double target_v, double& nx, double& ny) {
+            refine_opencv(target_u, target_v, nx, ny, IP);
+        }
+    );
+}
+
+py::array_t<double> seeded_normalize_splined(
+    py::array_t<double, py::array::c_style | py::array::forcecast> seed_pixels,
+    py::array_t<double, py::array::c_style | py::array::forcecast> seed_normals,
+    int seed_w,
+    int seed_h,
+    py::array_t<double, py::array::c_style | py::array::forcecast> query_pixels,
+    PinholeSplinedConfig& config,
+    PinholeSplinedIntrinsicsParameters& params
+) {
+    auto sp = seed_pixels.request();
+    auto sn = seed_normals.request();
+    auto qp = query_pixels.request();
+
+    validate_seeded_inputs(sp, sn, qp, seed_w, seed_h);
+
+    auto dxb = params.dx_grid.request();
+    auto dyb = params.dy_grid.request();
+    require(
+        (uint32_t)dxb.shape[0] == config.num_knots_y &&
+            (uint32_t)dxb.shape[1] == config.num_knots_x,
+        "dx_grid shape mismatch"
+    );
+    require(
+        (uint32_t)dyb.shape[0] == config.num_knots_y &&
+            (uint32_t)dyb.shape[1] == config.num_knots_x,
+        "dy_grid shape mismatch"
+    );
+
+    auto ppb = params.pinhole_parameters.request();
+    require(
+        ppb.ndim == 1 && ppb.shape[0] == 4,
+        "pinhole_parameters must be (4,)"
+    );
+    const double* pinhole_params = static_cast<const double*>(ppb.ptr);
+    const double fx = pinhole_params[0], fy = pinhole_params[1],
+                 cx = pinhole_params[2], cy = pinhole_params[3];
+    require(fx != 0.0 && fy != 0.0, "fx/fy must be non-zero");
+
+    const double* dxp = static_cast<const double*>(dxb.ptr);
+    const double* dyp = static_cast<const double*>(dyb.ptr);
+
+    const int M = (int)sp.shape[0];
+    const ssize_t N = qp.shape[0];
+    const double* SP = static_cast<const double*>(sp.ptr);
+    const double* SN = static_cast<const double*>(sn.ptr);
+    const double* QP = static_cast<const double*>(qp.ptr);
+
+    SplineConstants sc(&config, pinhole_params);
+
+    return run_seeded_normalize(
+        SP,
+        SN,
+        M,
+        seed_w,
+        seed_h,
+        QP,
+        N,
+        fx,
+        fy,
+        cx,
+        cy,
+        [&sc, dxp, dyp](double target_u, double target_v, double& nx, double& ny) {
+            refine_splined(target_u, target_v, nx, ny, sc, dxp, dyp);
+        }
+    );
 }
 
 }  // namespace lensboy
