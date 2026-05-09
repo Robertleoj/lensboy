@@ -17,8 +17,11 @@ _SUPPORTED_INTERPOLATIONS: tuple[str, ...] = (
     "bilinear",
     "bicubic",
 )
-_DEFAULT_MAX_ITERS = 50
-_DEFAULT_GRAD_TOL = 1.0e-12
+# Per-cell gradient-ascent tuning. Hidden from the user — these are tight
+# enough that the optimiser converges on every cell of any reasonable LUT,
+# and loosening them is never a useful knob in practice.
+_OPTIMISER_MAX_ITERS = 50
+_OPTIMISER_GRAD_TOL = 1.0e-12
 _ANGULAR_ERROR_MDEG_SCALE = 1.0e3
 _INTERP_TO_CPP_MODE: dict[str, int] = {
     "nearest": 0,
@@ -65,8 +68,6 @@ class UnprojectLUTAccuracyReport:
         interpolations: Interpolation modes included in the report. Each entry
             is one of ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
         max_angular_error_mdeg: Observed maximum angular error per interpolation mode.
-        max_iters: Per-cell gradient-ascent iteration cap used during the analysis.
-        grad_tol: Per-cell gradient-norm convergence threshold used during the analysis.
 
     Returns:
         Immutable report describing the requested interpolation modes.
@@ -74,80 +75,103 @@ class UnprojectLUTAccuracyReport:
 
     interpolations: tuple[str, ...]
     max_angular_error_mdeg: dict[str, float]
-    max_iters: int
-    grad_tol: float
 
 
 @dataclass
 class UnprojectLUTErrorHeatmap:
     """Per-cell angular-error heatmap for a LUT interpolation mode.
 
+    Stores three primary 2D arrays per cell — the pixel where the worst
+    angular error sits, and the exact and LUT-approximated normalised xy
+    rays at that pixel (z=1 is implied). Angular error, residual delta,
+    and unit residual direction are derivable from the rays and exposed
+    as properties.
+
     Args:
         interpolation: Interpolation mode represented by the heatmap. One of
             ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
-        max_iters: Per-cell gradient-ascent iteration cap used during the analysis.
-        grad_tol: Per-cell gradient-norm convergence threshold used during the analysis.
-        cell_x_edges: Cell x edges, shape ``(grid_width,)``
-            or ``(grid_width + 1,)``.
-        cell_y_edges: Cell y edges, shape ``(grid_height,)``
-            or ``(grid_height + 1,)``.
-        max_angular_error_deg: Per-cell maximum angular error,
-            shape ``(H, W)``.
-        error_direction_xy: Unit x/y direction of the local peak
-            error, shape ``(H, W, 2)``.
-        error_delta_xy: Peak x/y interpolation error vector, shape ``(H, W, 2)``.
+        cell_x_edges: Pixel-x boundaries between cells, shape ``(grid_width,)``.
+            Cell ``ix`` spans ``[cell_x_edges[ix], cell_x_edges[ix + 1]]``.
+        cell_y_edges: Pixel-y boundaries between cells, shape ``(grid_height,)``.
+            Cell ``iy`` spans ``[cell_y_edges[iy], cell_y_edges[iy + 1]]``.
         peak_pixel_xy: Pixel location of the local peak error, shape ``(H, W, 2)``.
+        exact_xy: Camera-model normalised xy at the peak pixel, shape
+            ``(H, W, 2)``. The full ray is ``(exact_x, exact_y, 1)``.
+        approx_xy: LUT-interpolated normalised xy at the peak pixel, shape
+            ``(H, W, 2)``. The full ray is ``(approx_x, approx_y, 1)``.
 
     Returns:
         In-memory representation of a saved or computed heatmap.
     """
 
     interpolation: str
-    max_iters: int
-    grad_tol: float
     cell_x_edges: np.ndarray
     cell_y_edges: np.ndarray
-    max_angular_error_deg: np.ndarray
-    error_direction_xy: np.ndarray
-    error_delta_xy: np.ndarray
     peak_pixel_xy: np.ndarray
+    exact_xy: np.ndarray
+    approx_xy: np.ndarray
 
     def __post_init__(self) -> None:
         self.interpolation = _validate_interpolation_mode(self.interpolation)
-        self.max_iters = int(self.max_iters)
-        self.grad_tol = float(self.grad_tol)
         self.cell_x_edges = np.asarray(self.cell_x_edges, dtype=np.float64).copy()
         self.cell_y_edges = np.asarray(self.cell_y_edges, dtype=np.float64).copy()
-        self.max_angular_error_deg = np.asarray(
-            self.max_angular_error_deg, dtype=np.float64
-        ).copy()
-        self.error_direction_xy = np.asarray(
-            self.error_direction_xy, dtype=np.float64
-        ).copy()
-        self.error_delta_xy = np.asarray(self.error_delta_xy, dtype=np.float64).copy()
         self.peak_pixel_xy = np.asarray(self.peak_pixel_xy, dtype=np.float64).copy()
+        self.exact_xy = np.asarray(self.exact_xy, dtype=np.float64).copy()
+        self.approx_xy = np.asarray(self.approx_xy, dtype=np.float64).copy()
 
-        if self.max_angular_error_deg.ndim != 2:
-            raise ValueError(
-                "max_angular_error_deg must have shape (H, W), "
-                f"got {self.max_angular_error_deg.shape}."
-            )
-        expected_vector_shape = (*self.max_angular_error_deg.shape, 2)
-        if self.error_direction_xy.shape != expected_vector_shape:
-            raise ValueError(
-                "error_direction_xy must have shape (H, W, 2), "
-                f"got {self.error_direction_xy.shape}."
-            )
-        if self.error_delta_xy.shape != expected_vector_shape:
-            raise ValueError(
-                "error_delta_xy must have shape (H, W, 2), "
-                f"got {self.error_delta_xy.shape}."
-            )
-        if self.peak_pixel_xy.shape != expected_vector_shape:
+        if self.peak_pixel_xy.ndim != 3 or self.peak_pixel_xy.shape[-1] != 2:
             raise ValueError(
                 "peak_pixel_xy must have shape (H, W, 2), "
                 f"got {self.peak_pixel_xy.shape}."
             )
+        expected_shape = self.peak_pixel_xy.shape
+        if self.exact_xy.shape != expected_shape:
+            raise ValueError(
+                f"exact_xy must have shape {expected_shape}, got {self.exact_xy.shape}."
+            )
+        if self.approx_xy.shape != expected_shape:
+            raise ValueError(
+                f"approx_xy must have shape {expected_shape}, "
+                f"got {self.approx_xy.shape}."
+            )
+
+    @property
+    def error_delta_xy(self) -> np.ndarray:
+        """Per-cell residual ``approx_xy − exact_xy``, shape ``(H, W, 2)``."""
+        return self.approx_xy - self.exact_xy
+
+    @property
+    def error_direction_xy(self) -> np.ndarray:
+        """Unit-length residual direction, shape ``(H, W, 2)``.
+
+        Zero where the residual is exactly zero.
+        """
+        delta = self.error_delta_xy
+        delta_norm = np.linalg.norm(delta, axis=-1, keepdims=True)
+        return np.divide(
+            delta,
+            delta_norm,
+            out=np.zeros_like(delta),
+            where=delta_norm > 0.0,
+        )
+
+    @property
+    def max_angular_error_deg(self) -> np.ndarray:
+        """Per-cell maximum angular error in degrees, shape ``(H, W)``.
+
+        Computed as ``atan2(‖cross‖, dot)`` between the rays
+        ``(exact_xy, 1)`` and ``(approx_xy, 1)``.
+        """
+        ex = self.exact_xy[..., 0]
+        ey = self.exact_xy[..., 1]
+        ax = self.approx_xy[..., 0]
+        ay = self.approx_xy[..., 1]
+        cross_x = ey - ay
+        cross_y = ax - ex
+        cross_z = ex * ay - ey * ax
+        cross_norm = np.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
+        dot = ex * ax + ey * ay + 1.0
+        return np.rad2deg(np.arctan2(cross_norm, dot))
 
     def save(self, path: Path | str) -> None:
         """Save the heatmap to a compressed NumPy archive.
@@ -161,14 +185,11 @@ class UnprojectLUTErrorHeatmap:
         np.savez_compressed(
             Path(path),
             interpolation=np.array(self.interpolation),
-            max_iters=np.array(self.max_iters, dtype=np.int64),
-            grad_tol=np.array(self.grad_tol, dtype=np.float64),
             cell_x_edges=self.cell_x_edges,
             cell_y_edges=self.cell_y_edges,
-            max_angular_error_deg=self.max_angular_error_deg,
-            error_direction_xy=self.error_direction_xy,
-            error_delta_xy=self.error_delta_xy,
             peak_pixel_xy=self.peak_pixel_xy,
+            exact_xy=self.exact_xy,
+            approx_xy=self.approx_xy,
         )
 
     @staticmethod
@@ -184,20 +205,13 @@ class UnprojectLUTErrorHeatmap:
         with np.load(Path(path)) as heatmap_data:
             return UnprojectLUTErrorHeatmap(
                 interpolation=str(np.asarray(heatmap_data["interpolation"]).item()),
-                max_iters=int(np.asarray(heatmap_data["max_iters"]).item()),
-                grad_tol=float(np.asarray(heatmap_data["grad_tol"]).item()),
                 cell_x_edges=np.asarray(heatmap_data["cell_x_edges"], dtype=np.float64),
                 cell_y_edges=np.asarray(heatmap_data["cell_y_edges"], dtype=np.float64),
-                max_angular_error_deg=np.asarray(
-                    heatmap_data["max_angular_error_deg"], dtype=np.float64
+                peak_pixel_xy=np.asarray(
+                    heatmap_data["peak_pixel_xy"], dtype=np.float64
                 ),
-                error_direction_xy=np.asarray(
-                    heatmap_data["error_direction_xy"], dtype=np.float64
-                ),
-                error_delta_xy=np.asarray(
-                    heatmap_data["error_delta_xy"], dtype=np.float64
-                ),
-                peak_pixel_xy=np.asarray(heatmap_data["peak_pixel_xy"], dtype=np.float64),
+                exact_xy=np.asarray(heatmap_data["exact_xy"], dtype=np.float64),
+                approx_xy=np.asarray(heatmap_data["approx_xy"], dtype=np.float64),
             )
 
 
@@ -206,15 +220,13 @@ def estimate_lut_accuracy(
     model: CameraModel,
     *,
     interpolations: str | Sequence[str] = "bilinear",
-    max_iters: int = _DEFAULT_MAX_ITERS,
-    grad_tol: float = _DEFAULT_GRAD_TOL,
 ) -> UnprojectLUTAccuracyReport:
     """Estimate maximum angular interpolation error for one or more modes.
 
     For each LUT cell, runs a gradient-ascent maximisation in normalised
-    camera-frame coordinates of ``‖approx_xy(project(n)) − n‖²`` with a
-    ReLU penalty enforcing that ``project(n)`` stays inside the pixel cell.
-    The reported value per mode is the worst per-cell maximum.
+    camera-frame coordinates of ``sin²(angle between approx and exact rays)``
+    with a ReLU penalty enforcing that ``project(n)`` stays inside the pixel
+    cell. The reported value per mode is the worst per-cell maximum.
 
     Args:
         lut: Runtime LUT to analyse.
@@ -223,8 +235,6 @@ def estimate_lut_accuracy(
         interpolations: Interpolation modes to include in the report. Each
             entry must be one of ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
             Pass a single string or a sequence of strings.
-        max_iters: Per-cell gradient-ascent iteration cap.
-        grad_tol: Per-cell gradient-norm convergence threshold.
 
     Returns:
         Accuracy report for the requested interpolation modes.
@@ -234,14 +244,10 @@ def estimate_lut_accuracy(
         lut,
         model,
         interpolations=normalized_interpolations,
-        max_iters=max_iters,
-        grad_tol=grad_tol,
     )
     return UnprojectLUTAccuracyReport(
         interpolations=normalized_interpolations,
         max_angular_error_mdeg=max_errors_mdeg,
-        max_iters=max_iters,
-        grad_tol=grad_tol,
     )
 
 
@@ -250,8 +256,6 @@ def compute_lut_error_heatmap(
     model: CameraModel,
     *,
     interpolation: str = "bilinear",
-    max_iters: int = _DEFAULT_MAX_ITERS,
-    grad_tol: float = _DEFAULT_GRAD_TOL,
 ) -> UnprojectLUTErrorHeatmap:
     """Compute a per-cell error heatmap for one interpolation mode.
 
@@ -266,8 +270,6 @@ def compute_lut_error_heatmap(
             :class:`PinholeSplined` or :class:`OpenCV` instance.
         interpolation: Interpolation mode to evaluate. One of ``"nearest"``,
             ``"bilinear"``, ``"bicubic"``.
-        max_iters: Per-cell gradient-ascent iteration cap.
-        grad_tol: Per-cell gradient-norm convergence threshold.
 
     Returns:
         In-memory heatmap for the requested interpolation mode.
@@ -278,38 +280,26 @@ def compute_lut_error_heatmap(
         lut,
         model,
         interpolation=interpolation,
-        max_iters=max_iters,
-        grad_tol=grad_tol,
     )
 
     heatmap_width = lut.grid_width - 1
     heatmap_height = lut.grid_height - 1
-    cells_grid = cells_result.reshape(heatmap_height, heatmap_width, 5)
+    cells_grid = cells_result.reshape(heatmap_height, heatmap_width, 6)
 
-    max_angular_error_deg = cells_grid[:, :, 0]
-    peak_pixel_xy = cells_grid[:, :, 1:3]
-    error_delta_xy = cells_grid[:, :, 3:5]
-    delta_norm = np.linalg.norm(error_delta_xy, axis=2, keepdims=True)
-    error_direction_xy = np.divide(
-        error_delta_xy,
-        delta_norm,
-        out=np.zeros_like(error_delta_xy),
-        where=delta_norm > 0.0,
-    )
+    peak_pixel_xy = cells_grid[:, :, 0:2]
+    exact_xy = cells_grid[:, :, 2:4]
+    approx_xy = cells_grid[:, :, 4:6]
 
     x_edges = np.linspace(lut.grid_x_min, lut.grid_x_max, lut.grid_width)
     y_edges = np.linspace(lut.grid_y_min, lut.grid_y_max, lut.grid_height)
 
     return UnprojectLUTErrorHeatmap(
         interpolation=interpolation,
-        max_iters=max_iters,
-        grad_tol=grad_tol,
         cell_x_edges=x_edges,
         cell_y_edges=y_edges,
-        max_angular_error_deg=max_angular_error_deg,
-        error_direction_xy=error_direction_xy,
-        error_delta_xy=error_delta_xy,
         peak_pixel_xy=peak_pixel_xy,
+        exact_xy=exact_xy,
+        approx_xy=approx_xy,
     )
 
 
@@ -318,8 +308,6 @@ def _max_cell_errors_call(
     model: CameraModel,
     *,
     interpolation: str,
-    max_iters: int,
-    grad_tol: float,
 ) -> np.ndarray:
     """Run the C++ per-cell maximiser for a single interpolation mode.
 
@@ -332,8 +320,6 @@ def _max_cell_errors_call(
             or OpenCV instance.
         interpolation: Interpolation mode. One of ``"nearest"``, ``"bilinear"``,
             ``"bicubic"``.
-        max_iters: Per-cell gradient-ascent iteration cap.
-        grad_tol: Per-cell gradient-norm convergence threshold.
 
     Returns:
         Per-cell results with shape ``(num_cells, 5)``. Columns are
@@ -359,8 +345,8 @@ def _max_cell_errors_call(
         "grid_y_min": lut.grid_y_min,
         "grid_y_max": lut.grid_y_max,
         "interpolation_mode": mode_int,
-        "max_iters": max_iters,
-        "grad_tol": grad_tol,
+        "max_iters": _OPTIMISER_MAX_ITERS,
+        "grad_tol": _OPTIMISER_GRAD_TOL,
     }
     if isinstance(model, PinholeSplined):
         return lbb.max_cell_errors_pinhole_splined(
@@ -390,8 +376,6 @@ def _max_cell_angular_errors_mdeg(
     model: CameraModel,
     *,
     interpolations: tuple[str, ...],
-    max_iters: int,
-    grad_tol: float,
 ) -> dict[str, float]:
     """Maximum per-cell angular error for each interpolation mode, in mdeg.
 
@@ -399,8 +383,6 @@ def _max_cell_angular_errors_mdeg(
         lut: Runtime LUT to analyse.
         model: Camera model the LUT was built from.
         interpolations: Interpolation modes to evaluate.
-        max_iters: Per-cell gradient-ascent iteration cap.
-        grad_tol: Per-cell gradient-norm convergence threshold.
 
     Returns:
         Mapping from interpolation mode to maximum angular error in millidegrees.
@@ -411,9 +393,17 @@ def _max_cell_angular_errors_mdeg(
             lut,
             model,
             interpolation=mode,
-            max_iters=max_iters,
-            grad_tol=grad_tol,
         )
-        max_err_deg = float(np.max(cells_result[:, 0]))
+        ex = cells_result[:, 2]
+        ey = cells_result[:, 3]
+        ax = cells_result[:, 4]
+        ay = cells_result[:, 5]
+        cross_x = ey - ay
+        cross_y = ax - ex
+        cross_z = ex * ay - ey * ax
+        cross_norm = np.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
+        dot = ex * ax + ey * ay + 1.0
+        per_cell_deg = np.rad2deg(np.arctan2(cross_norm, dot))
+        max_err_deg = float(np.max(per_cell_deg))
         max_errors_mdeg[mode] = max_err_deg * _ANGULAR_ERROR_MDEG_SCALE
     return max_errors_mdeg

@@ -581,11 +581,12 @@ struct CellMaximizer {
         const double* n10,
         const double* n01,
         const double* n11,
-        double& out_max_angular_deg,
         double& out_peak_pixel_x,
         double& out_peak_pixel_y,
-        double& out_delta_x,
-        double& out_delta_y
+        double& out_exact_x,
+        double& out_exact_y,
+        double& out_approx_x,
+        double& out_approx_y
     ) const {
         const double n_lo_x = std::min({n00[0], n10[0], n01[0], n11[0]});
         const double n_hi_x = std::max({n00[0], n10[0], n01[0], n11[0]});
@@ -669,12 +670,12 @@ struct CellMaximizer {
             approx_x,
             approx_y
         );
-        out_max_angular_deg =
-            angular_error_deg_from_xy(best_nx, best_ny, approx_x, approx_y);
         out_peak_pixel_x = peak_px;
         out_peak_pixel_y = peak_py;
-        out_delta_x = approx_x - best_nx;
-        out_delta_y = approx_y - best_ny;
+        out_exact_x = best_nx;
+        out_exact_y = best_ny;
+        out_approx_x = approx_x;
+        out_approx_y = approx_y;
     }
 };
 
@@ -711,7 +712,7 @@ py::array_t<double> run_max_cell_errors(
     const ssize_t num_cells =
         static_cast<ssize_t>(num_cells_x) * static_cast<ssize_t>(num_cells_y);
 
-    py::array_t<double> out({num_cells, static_cast<ssize_t>(5)});
+    py::array_t<double> out({num_cells, static_cast<ssize_t>(6)});
     auto ob = out.request();
     double* O = static_cast<double*>(ob.ptr);
 
@@ -753,11 +754,12 @@ py::array_t<double> run_max_cell_errors(
             const double* n11 =
                 lut_xy_grid + ((cy + 1) * Wgrid + (cx + 1)) * 2;
 
-            double max_err_deg = 0.0;
             double peak_px = 0.5 * (cell_x0 + cell_x1);
             double peak_py = 0.5 * (cell_y0 + cell_y1);
-            double delta_x = 0.0;
-            double delta_y = 0.0;
+            double exact_x = 0.0;
+            double exact_y = 0.0;
+            double approx_x = 0.0;
+            double approx_y = 0.0;
             maximizer.run(
                 cell_x0,
                 cell_x1,
@@ -767,19 +769,21 @@ py::array_t<double> run_max_cell_errors(
                 n10,
                 n01,
                 n11,
-                max_err_deg,
                 peak_px,
                 peak_py,
-                delta_x,
-                delta_y
+                exact_x,
+                exact_y,
+                approx_x,
+                approx_y
             );
 
-            double* row = O + cell_idx * 5;
-            row[0] = max_err_deg;
-            row[1] = peak_px;
-            row[2] = peak_py;
-            row[3] = delta_x;
-            row[4] = delta_y;
+            double* row = O + cell_idx * 6;
+            row[0] = peak_px;
+            row[1] = peak_py;
+            row[2] = exact_x;
+            row[3] = exact_y;
+            row[4] = approx_x;
+            row[5] = approx_y;
         }
     }
 
