@@ -252,7 +252,8 @@ static bool idw_interp_from_nn(
 // Newton refinement: generic 2D solver using Ceres Jet autodiff.
 // ---------------------------------------------------------------------------
 
-// Forward-project (normalized_x, normalized_y) -> (pixel_x, pixel_y) for the OpenCV model.
+// Forward-project (normalized_x, normalized_y) -> (pixel_x, pixel_y) for the
+// OpenCV model.
 template <typename T>
 static inline void forward_opencv(
     const T& normalized_x,
@@ -268,7 +269,8 @@ static inline void forward_opencv(
     pixel_y = result[1];
 }
 
-// Forward-project (normalized_x, normalized_y) -> (pixel_x, pixel_y) for the pinhole-splined model.
+// Forward-project (normalized_x, normalized_y) -> (pixel_x, pixel_y) for the
+// pinhole-splined model.
 template <typename T>
 static inline void forward_splined(
     const T& normalized_x,
@@ -294,7 +296,8 @@ static inline void forward_splined(
     pixel_y = result[1];
 }
 
-// Newton refinement for OpenCV model, starting from initial guess (normalized_x, normalized_y).
+// Newton refinement for OpenCV model, starting from initial guess
+// (normalized_x, normalized_y).
 static void refine_opencv(
     double target_u,
     double target_v,
@@ -306,7 +309,8 @@ static void refine_opencv(
     constexpr int max_iter = 20;
     constexpr double tol_sq = 1e-14;
 
-    // Convert intrinsics to Jet constants (only normalized_x, normalized_y are variables)
+    // Convert intrinsics to Jet constants (only normalized_x, normalized_y are
+    // variables)
     std::array<Jet, 18> jintrinsics;
     for (int i = 0; i < 18; i++) {
         jintrinsics[i] = Jet(intrinsics[i]);
@@ -316,7 +320,13 @@ static void refine_opencv(
         Jet jet_normalized_x(normalized_x, 0);
         Jet jet_normalized_y(normalized_y, 1);
         Jet jet_pixel_x, jet_pixel_y;
-        forward_opencv(jet_normalized_x, jet_normalized_y, jintrinsics.data(), jet_pixel_x, jet_pixel_y);
+        forward_opencv(
+            jet_normalized_x,
+            jet_normalized_y,
+            jintrinsics.data(),
+            jet_pixel_x,
+            jet_pixel_y
+        );
 
         double r0 = jet_pixel_x.a - target_u;
         double r1 = jet_pixel_y.a - target_v;
@@ -418,7 +428,12 @@ static void refine_splined(
             Jet jet_normalized_x(normalized_x, 0);
             Jet jet_normalized_y(normalized_y, 1);
             Jet jsx, jsy;
-            normalized_to_stereographic(jet_normalized_x, jet_normalized_y, jsx, jsy);
+            normalized_to_stereographic(
+                jet_normalized_x,
+                jet_normalized_y,
+                jsx,
+                jsy
+            );
             Jet jgx = clamp_T(
                 Jet(1.0) + (jsx + Jet(half_x)) * Jet(x_scale),
                 Jet(0.0),
@@ -444,8 +459,10 @@ static void refine_splined(
                     ki++;
                 }
             }
-            Jet r0 = Jet(sc.fx) * (jet_normalized_x + dx_val) + Jet(sc.cx) - Jet(target_u);
-            Jet r1 = Jet(sc.fy) * (jet_normalized_y + dy_val) + Jet(sc.cy) - Jet(target_v);
+            Jet r0 = Jet(sc.fx) * (jet_normalized_x + dx_val) + Jet(sc.cx) -
+                     Jet(target_u);
+            Jet r1 = Jet(sc.fy) * (jet_normalized_y + dy_val) + Jet(sc.cy) -
+                     Jet(target_v);
             double res0 = r0.a, res1 = r1.a;
             if (res0 * res0 + res1 * res1 < tol_sq) {
                 break;
@@ -618,7 +635,12 @@ py::array_t<double> seeded_normalize_opencv(
         IP[1],
         IP[2],
         IP[3],
-        [IP](double target_u, double target_v, double& normalized_x, double& normalized_y) {
+        [IP](
+            double target_u,
+            double target_v,
+            double& normalized_x,
+            double& normalized_y
+        ) {
             refine_opencv(target_u, target_v, normalized_x, normalized_y, IP);
         }
     );
@@ -685,8 +707,21 @@ py::array_t<double> seeded_normalize_splined(
         fy,
         cx,
         cy,
-        [&sc, dxp, dyp](double target_u, double target_v, double& normalized_x, double& normalized_y) {
-            refine_splined(target_u, target_v, normalized_x, normalized_y, sc, dxp, dyp);
+        [&sc, dxp, dyp](
+            double target_u,
+            double target_v,
+            double& normalized_x,
+            double& normalized_y
+        ) {
+            refine_splined(
+                target_u,
+                target_v,
+                normalized_x,
+                normalized_y,
+                sc,
+                dxp,
+                dyp
+            );
         }
     );
 }

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
 from lensboy.camera_models.unproject_lut import UnprojectLUT
 
 if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+
     from lensboy.camera_models.base_model import CameraModel
 
 _SUPPORTED_INTERPOLATIONS: tuple[str, ...] = (
@@ -22,7 +23,6 @@ _SUPPORTED_INTERPOLATIONS: tuple[str, ...] = (
 # and loosening them is never a useful knob in practice.
 _OPTIMISER_MAX_ITERS = 50
 _OPTIMISER_GRAD_TOL = 1.0e-12
-_ANGULAR_ERROR_MDEG_SCALE = 1.0e3
 _INTERP_TO_CPP_MODE: dict[str, int] = {
     "nearest": 0,
     "bilinear": 1,
@@ -37,44 +37,6 @@ def _validate_interpolation_mode(interpolation: str) -> str:
             f"Expected one of {_SUPPORTED_INTERPOLATIONS}."
         )
     return interpolation
-
-
-def _normalize_interpolations(
-    interpolations: str | Sequence[str],
-) -> tuple[str, ...]:
-    if isinstance(interpolations, str):
-        raw_items = [interpolations]
-    else:
-        raw_items = list(interpolations)
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in raw_items:
-        mode = _validate_interpolation_mode(item)
-        if mode in seen:
-            continue
-        normalized.append(mode)
-        seen.add(mode)
-    if len(normalized) == 0:
-        raise ValueError("interpolations must be non-empty.")
-    return tuple(normalized)
-
-
-@dataclass(frozen=True)
-class UnprojectLUTAccuracyReport:
-    """Accuracy summary for one or more LUT interpolation modes.
-
-    Args:
-        interpolations: Interpolation modes included in the report. Each entry
-            is one of ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
-        max_angular_error_mdeg: Observed maximum angular error per interpolation mode.
-
-    Returns:
-        Immutable report describing the requested interpolation modes.
-    """
-
-    interpolations: tuple[str, ...]
-    max_angular_error_mdeg: dict[str, float]
 
 
 @dataclass
@@ -131,8 +93,7 @@ class UnprojectLUTErrorHeatmap:
             )
         if self.approx_xy.shape != expected_shape:
             raise ValueError(
-                f"approx_xy must have shape {expected_shape}, "
-                f"got {self.approx_xy.shape}."
+                f"approx_xy must have shape {expected_shape}, got {self.approx_xy.shape}."
             )
 
     @property
@@ -207,48 +168,69 @@ class UnprojectLUTErrorHeatmap:
                 interpolation=str(np.asarray(heatmap_data["interpolation"]).item()),
                 cell_x_edges=np.asarray(heatmap_data["cell_x_edges"], dtype=np.float64),
                 cell_y_edges=np.asarray(heatmap_data["cell_y_edges"], dtype=np.float64),
-                peak_pixel_xy=np.asarray(
-                    heatmap_data["peak_pixel_xy"], dtype=np.float64
-                ),
+                peak_pixel_xy=np.asarray(heatmap_data["peak_pixel_xy"], dtype=np.float64),
                 exact_xy=np.asarray(heatmap_data["exact_xy"], dtype=np.float64),
                 approx_xy=np.asarray(heatmap_data["approx_xy"], dtype=np.float64),
             )
 
+    def plot(
+        self,
+        *,
+        title: str | None = None,
+        angular_unit: Literal["deg", "mdeg", "udeg", "rad", "mrad", "urad"] = "mdeg",
+        vmax: float | None = None,
+        show_directions: bool = True,
+        arrow_grid: int = 28,
+        arrow_scale: float = 0.5,
+        constant_arrow_length: bool = False,
+        cmap_name: str = "inferno",
+        figsize: tuple[float, float] = (8.5, 6.0),
+        return_figure: bool = False,
+    ) -> Figure | None:
+        """Plot the per-cell maximum angular error as a heatmap.
 
-def estimate_lut_accuracy(
-    lut: UnprojectLUT,
-    model: CameraModel,
-    *,
-    interpolations: str | Sequence[str] = "bilinear",
-) -> UnprojectLUTAccuracyReport:
-    """Estimate maximum angular interpolation error for one or more modes.
+        Optionally overlays the local peak x/y interpolation error direction in
+        each cell. Arrow length is proportional to per-cell error magnitude by
+        default.
 
-    For each LUT cell, runs a gradient-ascent maximisation in normalised
-    camera-frame coordinates of ``sin²(angle between approx and exact rays)``
-    with a ReLU penalty enforcing that ``project(n)`` stays inside the pixel
-    cell. The reported value per mode is the worst per-cell maximum.
+        Args:
+            title: Plot title. Uses the heatmap's interpolation mode when omitted.
+            angular_unit: Angular units for the heatmap color scale.
+            vmax: Upper limit of the colorbar in the same units as ``angular_unit``.
+                Cells above this clip to the top colour. ``None`` auto-fits to the
+                data.
+            show_directions: Whether to draw the error-direction arrows.
+            arrow_grid: Approximate maximum number of arrows along the longer
+                heatmap axis.
+            arrow_scale: Arrow length, as a fraction of the spacing between drawn
+                arrows, for the largest-error cell drawn. Other arrows scale down
+                proportionally to their error magnitude (or are all this length
+                when ``constant_arrow_length=True``).
+            constant_arrow_length: If True, draw all arrows the same length
+                regardless of per-cell error magnitude.
+            cmap_name: Matplotlib colormap name for the heatmap.
+            figsize: Figure size in inches as ``(width, height)``.
+            return_figure: If True, return the figure instead of calling
+                ``plt.show()``.
 
-    Args:
-        lut: Runtime LUT to analyse.
-        model: The exact camera model the LUT was built from. Must be a
-            :class:`PinholeSplined` or :class:`OpenCV` instance.
-        interpolations: Interpolation modes to include in the report. Each
-            entry must be one of ``"nearest"``, ``"bilinear"``, ``"bicubic"``.
-            Pass a single string or a sequence of strings.
+        Returns:
+            The figure if ``return_figure`` is True, otherwise None.
+        """
+        from lensboy.analysis.plots import _plot_unproject_lut_error_heatmap
 
-    Returns:
-        Accuracy report for the requested interpolation modes.
-    """
-    normalized_interpolations = _normalize_interpolations(interpolations)
-    max_errors_mdeg = _max_cell_angular_errors_mdeg(
-        lut,
-        model,
-        interpolations=normalized_interpolations,
-    )
-    return UnprojectLUTAccuracyReport(
-        interpolations=normalized_interpolations,
-        max_angular_error_mdeg=max_errors_mdeg,
-    )
+        return _plot_unproject_lut_error_heatmap(
+            self,
+            title=title,
+            angular_unit=angular_unit,
+            vmax=vmax,
+            show_directions=show_directions,
+            arrow_grid=arrow_grid,
+            arrow_scale=arrow_scale,
+            constant_arrow_length=constant_arrow_length,
+            cmap_name=cmap_name,
+            figsize=figsize,
+            return_figure=return_figure,
+        )
 
 
 def compute_lut_error_heatmap(
@@ -369,41 +351,3 @@ def _max_cell_errors_call(
         "Per-cell error analysis is only supported for PinholeSplined and "
         "OpenCV camera models."
     )
-
-
-def _max_cell_angular_errors_mdeg(
-    lut: UnprojectLUT,
-    model: CameraModel,
-    *,
-    interpolations: tuple[str, ...],
-) -> dict[str, float]:
-    """Maximum per-cell angular error for each interpolation mode, in mdeg.
-
-    Args:
-        lut: Runtime LUT to analyse.
-        model: Camera model the LUT was built from.
-        interpolations: Interpolation modes to evaluate.
-
-    Returns:
-        Mapping from interpolation mode to maximum angular error in millidegrees.
-    """
-    max_errors_mdeg: dict[str, float] = {}
-    for mode in interpolations:
-        cells_result = _max_cell_errors_call(
-            lut,
-            model,
-            interpolation=mode,
-        )
-        ex = cells_result[:, 2]
-        ey = cells_result[:, 3]
-        ax = cells_result[:, 4]
-        ay = cells_result[:, 5]
-        cross_x = ey - ay
-        cross_y = ax - ex
-        cross_z = ex * ay - ey * ax
-        cross_norm = np.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
-        dot = ex * ax + ey * ay + 1.0
-        per_cell_deg = np.rad2deg(np.arctan2(cross_norm, dot))
-        max_err_deg = float(np.max(per_cell_deg))
-        max_errors_mdeg[mode] = max_err_deg * _ANGULAR_ERROR_MDEG_SCALE
-    return max_errors_mdeg

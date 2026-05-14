@@ -139,42 +139,30 @@ def test_linear_pinhole_lut_round_trips_through_float32(tmp_path: Path) -> None:
     assert max_abs_error < 1e-6
 
 
-def test_unproject_lut_analyzer_can_report_multiple_interpolations() -> None:
-    """The analyzer can report multiple interpolation modes at once."""
-    from lensboy.analysis import estimate_lut_accuracy
+def test_unproject_lut_heatmap_bilinear_beats_nearest() -> None:
+    """Bilinear interpolation has a smaller worst-cell error than nearest."""
+    from lensboy.analysis import compute_lut_error_heatmap
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    report = estimate_lut_accuracy(
-        lut, model, interpolations=("nearest", "bilinear", "bicubic")
-    )
 
-    assert report.interpolations == ("nearest", "bilinear", "bicubic")
-    assert np.isfinite(report.max_angular_error_mdeg["nearest"])
-    assert np.isfinite(report.max_angular_error_mdeg["bilinear"])
-    assert np.isfinite(report.max_angular_error_mdeg["bicubic"])
-    assert (
-        report.max_angular_error_mdeg["bilinear"]
-        < report.max_angular_error_mdeg["nearest"]
-    )
+    max_errors = {
+        mode: float(
+            compute_lut_error_heatmap(
+                lut, model, interpolation=mode
+            ).max_angular_error_deg.max()
+        )
+        for mode in ("nearest", "bilinear", "bicubic")
+    }
 
-
-def test_unproject_lut_analyzer_accepts_single_interpolation() -> None:
-    """A single interpolation mode can be passed directly to the analyzer."""
-    from lensboy.analysis import estimate_lut_accuracy
-
-    model = _load_opencv_model()
-    lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    report = estimate_lut_accuracy(lut, model, interpolations="bicubic")
-
-    assert report.interpolations == ("bicubic",)
-    assert set(report.max_angular_error_mdeg) == {"bicubic"}
-    assert np.isfinite(report.max_angular_error_mdeg["bicubic"])
+    for value in max_errors.values():
+        assert np.isfinite(value)
+    assert max_errors["bilinear"] < max_errors["nearest"]
 
 
-def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path) -> None:
-    """Loaded LUTs produce the same analyzer report as in-memory LUTs."""
-    from lensboy.analysis import estimate_lut_accuracy
+def test_unproject_lut_heatmap_matches_loaded_and_in_memory_lut(tmp_path: Path) -> None:
+    """Loaded LUTs produce the same heatmap max as in-memory LUTs."""
+    from lensboy.analysis import compute_lut_error_heatmap
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
@@ -182,18 +170,18 @@ def test_unproject_lut_analyzer_matches_loaded_and_in_memory_lut(tmp_path: Path)
     lut.save(dir_path)
     loaded = lb.UnprojectLUT.load(dir_path)
 
-    report_before = estimate_lut_accuracy(
-        lut, model, interpolations=("nearest", "bilinear", "bicubic")
-    )
-    report_after = estimate_lut_accuracy(
-        loaded, model, interpolations=("nearest", "bilinear", "bicubic")
-    )
-
-    assert report_after.interpolations == report_before.interpolations
-    for mode in report_before.interpolations:
-        assert report_after.max_angular_error_mdeg[mode] == pytest.approx(
-            report_before.max_angular_error_mdeg[mode], rel=1e-3
+    for mode in ("nearest", "bilinear", "bicubic"):
+        before = float(
+            compute_lut_error_heatmap(
+                lut, model, interpolation=mode
+            ).max_angular_error_deg.max()
         )
+        after = float(
+            compute_lut_error_heatmap(
+                loaded, model, interpolation=mode
+            ).max_angular_error_deg.max()
+        )
+        assert after == pytest.approx(before, rel=1e-3)
 
 
 def test_unproject_lut_grid_stride_can_be_fractional() -> None:
@@ -260,16 +248,15 @@ def test_unproject_lut_bicubic_falls_back_to_bilinear_without_full_stencil() -> 
     )
 
 
-def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
-    """A nonlinear model produces finite observed angular error summaries."""
-    from lensboy.analysis import estimate_lut_accuracy
+def test_unproject_lut_heatmap_bounds_dense_error_for_nonlinear_model() -> None:
+    """Dense-sampled error stays under the heatmap's worst-cell max."""
+    from lensboy.analysis import compute_lut_error_heatmap
 
     model = _load_opencv_model()
     lut = model.get_unproject_lut(grid_size_wh=(7, 6))
-    report = estimate_lut_accuracy(lut, model)
-
-    assert report.interpolations == ("bilinear",)
-    assert np.isfinite(report.max_angular_error_mdeg["bilinear"])
+    heatmap = compute_lut_error_heatmap(lut, model, interpolation="bilinear")
+    max_error_deg = float(heatmap.max_angular_error_deg.max())
+    assert np.isfinite(max_error_deg)
 
     xs = np.linspace(0.0, model.image_width - 1, 35)
     ys = np.linspace(0.0, model.image_height - 1, 27)
@@ -278,7 +265,7 @@ def test_unproject_lut_analyzer_report_is_finite_for_nonlinear_model() -> None:
     exact = model.normalize_points(pixels)
     approx, _ = lut.normalize_points(pixels, interpolation="bilinear")
     dense_error = _query_error_deg(exact, approx)
-    assert dense_error <= (report.max_angular_error_mdeg["bilinear"] / 1.0e3) + 1.0
+    assert dense_error <= max_error_deg + 1.0
 
 
 def test_unproject_lut_rejects_unsupported_lensboy_version(tmp_path: Path) -> None:
@@ -338,22 +325,6 @@ def test_unproject_lut_analyzer_can_save_and_load_error_heatmaps(tmp_path: Path)
 def _heatmap_test_lut(model: lb.OpenCV) -> lb.UnprojectLUT:
     """Realistic LUT used by the heatmap correctness tests."""
     return model.get_unproject_lut(pixel_stride=32.0)
-
-
-def test_heatmap_max_matches_analyzer_max() -> None:
-    """compute_lut_error_heatmap and estimate_lut_accuracy agree on the global max."""
-    from lensboy.analysis import compute_lut_error_heatmap, estimate_lut_accuracy
-
-    model = _load_opencv_model()
-    lut = _heatmap_test_lut(model)
-
-    for mode in ("nearest", "bilinear", "bicubic"):
-        heatmap = compute_lut_error_heatmap(lut, model, interpolation=mode)
-        report = estimate_lut_accuracy(lut, model, interpolations=mode)
-
-        heatmap_max_mdeg = float(np.max(heatmap.max_angular_error_deg)) * 1.0e3
-        report_max_mdeg = report.max_angular_error_mdeg[mode]
-        assert heatmap_max_mdeg == pytest.approx(report_max_mdeg, rel=1e-9, abs=1e-9)
 
 
 def test_heatmap_peak_pixel_reproduces_reported_error() -> None:
@@ -477,14 +448,11 @@ def test_heatmap_is_essentially_zero_for_linear_pinhole() -> None:
         assert np.max(heatmap.max_angular_error_deg) < 1e-6
 
 
-def test_plot_unproject_lut_error_heatmap_supports_angular_units(tmp_path: Path) -> None:
-    """The heatmap plot helper rescales angular error into the requested units."""
+def test_heatmap_plot_supports_angular_units() -> None:
+    """The heatmap plot method rescales angular error into the requested units."""
     import matplotlib
 
-    from lensboy.analysis import (
-        compute_lut_error_heatmap,
-        plot_unproject_lut_error_heatmap,
-    )
+    from lensboy.analysis import compute_lut_error_heatmap
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -494,8 +462,7 @@ def test_plot_unproject_lut_error_heatmap_supports_angular_units(tmp_path: Path)
     heatmap = compute_lut_error_heatmap(lut, model, interpolation="bilinear")
     expected_mdeg = heatmap.max_angular_error_deg * 1.0e3
 
-    fig = plot_unproject_lut_error_heatmap(
-        heatmap,
+    fig = heatmap.plot(
         angular_unit="mdeg",
         show_directions=False,
         return_figure=True,
@@ -512,14 +479,11 @@ def test_plot_unproject_lut_error_heatmap_supports_angular_units(tmp_path: Path)
     plt.close(fig)
 
 
-def test_plot_unproject_lut_error_heatmap_accepts_figsize() -> None:
-    """The heatmap plot helper forwards the requested figure size."""
+def test_heatmap_plot_accepts_figsize() -> None:
+    """The heatmap plot method forwards the requested figure size."""
     import matplotlib
 
-    from lensboy.analysis import (
-        compute_lut_error_heatmap,
-        plot_unproject_lut_error_heatmap,
-    )
+    from lensboy.analysis import compute_lut_error_heatmap
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -528,8 +492,7 @@ def test_plot_unproject_lut_error_heatmap_accepts_figsize() -> None:
     lut = model.get_unproject_lut(grid_size_wh=(6, 5))
     heatmap = compute_lut_error_heatmap(lut, model, interpolation="bilinear")
 
-    fig = plot_unproject_lut_error_heatmap(
-        heatmap,
+    fig = heatmap.plot(
         figsize=(7.8, 5.3),
         return_figure=True,
     )

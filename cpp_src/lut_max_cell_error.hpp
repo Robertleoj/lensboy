@@ -16,7 +16,8 @@ namespace py = pybind11;
 // implicit in the maximised sin²); approx_xy is the LUT's interpolated
 // value at the peak pixel. Angular error and residual delta are derivable
 // from these two rays.
-// num_cells = (grid_width - 1) * (grid_height - 1), row-major over (cell_y, cell_x).
+// num_cells = (grid_width - 1) * (grid_height - 1), row-major over (cell_y,
+// cell_x).
 //
 // interpolation_mode: 0=nearest, 1=bilinear, 2=bicubic.
 

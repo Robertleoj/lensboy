@@ -2152,7 +2152,7 @@ def plot_projection_diff(
     return None
 
 
-def plot_unproject_lut_error_heatmap(
+def _plot_unproject_lut_error_heatmap(
     heatmap: UnprojectLUTErrorHeatmap,
     *,
     title: str | None = None,
@@ -2199,9 +2199,7 @@ def plot_unproject_lut_error_heatmap(
     max_angular_error_deg = np.asarray(
         heatmap.max_angular_error_deg, dtype=np.float64
     ).copy()
-    error_direction_xy = np.asarray(
-        heatmap.error_direction_xy, dtype=np.float64
-    ).copy()
+    error_direction_xy = np.asarray(heatmap.error_direction_xy, dtype=np.float64).copy()
     interpolation = heatmap.interpolation
 
     angular_unit_scales = {

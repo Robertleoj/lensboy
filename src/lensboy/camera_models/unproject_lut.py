@@ -170,9 +170,7 @@ def _sample_xy_grid_seeded(
 
     seed_pixels, seed_normals, seed_w, seed_h = _compute_seed_grid(camera_model)  # type: ignore[arg-type]
 
-    rays = seeded_normalize(
-        seed_pixels, seed_normals, seed_w, seed_h, query_pixels
-    )
+    rays = seeded_normalize(seed_pixels, seed_normals, seed_w, seed_h, query_pixels)
 
     xy = np.asarray(rays[:, :2], dtype=np.float64)
     return xy.reshape(grid_height, grid_width, 2)

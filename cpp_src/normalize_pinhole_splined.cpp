@@ -41,7 +41,8 @@ static Vec2<double> normalize_single_point(
         double sx, sy;
         normalized_to_stereographic(normalized_x, normalized_y, sx, sy);
 
-        // Compute cell index for current (normalized_x, normalized_y) in stereographic space
+        // Compute cell index for current (normalized_x, normalized_y) in
+        // stereographic space
         double gx = std::max(
             0.0,
             std::min(1.0 + (sx + half_x) * x_scale, Nx - 1.0 - eps)
@@ -73,7 +74,12 @@ static Vec2<double> normalize_single_point(
 
             // Normalized coords -> stereographic -> spline coords
             Jet jsx, jsy;
-            normalized_to_stereographic(jet_normalized_x, jet_normalized_y, jsx, jsy);
+            normalized_to_stereographic(
+                jet_normalized_x,
+                jet_normalized_y,
+                jsx,
+                jsy
+            );
 
             Jet jgx = clamp_T(
                 Jet(1.0) + (jsx + Jet(half_x)) * Jet(x_scale),
@@ -106,8 +112,10 @@ static Vec2<double> normalize_single_point(
             }
 
             // Projection residual
-            Jet r0 = Jet(fx) * (jet_normalized_x + dx_val) + Jet(cx) - Jet(target_u);
-            Jet r1 = Jet(fy) * (jet_normalized_y + dy_val) + Jet(cy) - Jet(target_v);
+            Jet r0 =
+                Jet(fx) * (jet_normalized_x + dx_val) + Jet(cx) - Jet(target_u);
+            Jet r1 =
+                Jet(fy) * (jet_normalized_y + dy_val) + Jet(cy) - Jet(target_v);
 
             const double res0 = r0.a;
             const double res1 = r1.a;
