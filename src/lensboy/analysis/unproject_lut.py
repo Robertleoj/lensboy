@@ -327,8 +327,8 @@ def _max_cell_errors_call(
         "grid_y_min": lut.grid_y_min,
         "grid_y_max": lut.grid_y_max,
         "interpolation_mode": mode_int,
-        "max_iters": _OPTIMISER_MAX_ITERS,
-        "grad_tol": _OPTIMISER_GRAD_TOL,
+        "max_iterations": _OPTIMISER_MAX_ITERS,
+        "gradient_tolerance": _OPTIMISER_GRAD_TOL,
     }
     if isinstance(model, PinholeSplined):
         return lbb.max_cell_errors_pinhole_splined(

@@ -275,8 +275,8 @@ PYBIND11_MODULE(
         py::arg("grid_y_min"),
         py::arg("grid_y_max"),
         py::arg("interpolation_mode"),
-        py::arg("max_iters"),
-        py::arg("grad_tol")
+        py::arg("max_iterations"),
+        py::arg("gradient_tolerance")
     );
 
     m.def(
@@ -289,8 +289,8 @@ PYBIND11_MODULE(
         py::arg("grid_y_min"),
         py::arg("grid_y_max"),
         py::arg("interpolation_mode"),
-        py::arg("max_iters"),
-        py::arg("grad_tol")
+        py::arg("max_iterations"),
+        py::arg("gradient_tolerance")
     );
 
     m.def(
