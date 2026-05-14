@@ -91,31 +91,27 @@ The calibrated model converts to a pinhole model with undistortion maps, so you 
 
 ## Runtime unproject LUTs
 
-If you want a compact runtime cache of `normalize_points()`, `lensboy` can export a
-single `.unproject_LUT` file with a human-readable text header followed by a binary
-payload:
+Iterative unprojection can be too slow for some applications.
+`UnprojectLUT` caches `normalize_points()` on a regular pixel grid so
+that per-pixel queries reduce to a bicubic interpolation. The cache is
+saved as a directory of `metadata.json` + `xy_grid.npy`, loadable from
+Python or from a small standalone C++ runtime in
+[`cpp_runtime/`](cpp_runtime/).
 
 ```python
 import lensboy as lb
-from lensboy.analysis import estimate_lut_accuracy, compute_lut_error_heatmap
+from lensboy.analysis import compute_lut_error_heatmap
 
 model = lb.OpenCV.load("camera.json")
-lut = model.get_unproject_lut(
-    pixel_stride=32,
-    storage_encoding="float32_xy",
-)
-lut.save("camera.unproject_LUT")
+lut = model.get_unproject_lut(pixel_stride=32)
+lut.save("camera_lut/")
 
-runtime_lut = lb.UnprojectLUT.load("camera.unproject_LUT")
-rays, valid_mask = runtime_lut.normalize_points(
-    pixel_coords,
-    interpolation="bilinear",
-)
+runtime_lut = lb.UnprojectLUT.load("camera_lut/")
+rays, valid_mask = runtime_lut.normalize_points(pixel_coords)
 
-report = estimate_lut_accuracy(runtime_lut, model, interpolations="bilinear")
-heatmap = compute_lut_error_heatmap(runtime_lut, model, interpolation="bilinear")
+heatmap = compute_lut_error_heatmap(runtime_lut, model)
 ```
 
 See the [unproject LUT guide](https://robertleoj.github.io/lensboy/unproject_lut.html)
-for the file format, size/error tradeoffs, and C++ runtime usage. There is also a runnable
-[Marimo example](examples/unproject_lut_mo.py).
+for sizing, interpolation modes, the file format, and the C++ runtime.
+There is also a runnable [Jupyter notebook](examples/unproject_lut.ipynb).
