@@ -444,7 +444,7 @@ class UnprojectLUT:
         self,
         pixel_coords: np.ndarray,
         *,
-        interpolation: str = "bilinear",
+        interpolation: str = "bicubic",
     ) -> tuple[np.ndarray, np.ndarray]:
         """Query the LUT for camera-frame rays.
 

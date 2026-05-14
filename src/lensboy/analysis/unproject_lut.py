@@ -237,7 +237,7 @@ def compute_lut_error_heatmap(
     lut: UnprojectLUT,
     model: CameraModel,
     *,
-    interpolation: str = "bilinear",
+    interpolation: str = "bicubic",
 ) -> UnprojectLUTErrorHeatmap:
     """Compute a per-cell error heatmap for one interpolation mode.
 
@@ -248,8 +248,7 @@ def compute_lut_error_heatmap(
 
     Args:
         lut: Runtime LUT to analyse.
-        model: The exact camera model the LUT was built from. Must be a
-            :class:`PinholeSplined` or :class:`OpenCV` instance.
+        model: The exact camera model the LUT was built from.
         interpolation: Interpolation mode to evaluate. One of ``"nearest"``,
             ``"bilinear"``, ``"bicubic"``.
 
@@ -298,8 +297,7 @@ def _max_cell_errors_call(
 
     Args:
         lut: Runtime LUT to analyse.
-        model: Camera model the LUT was built from. Must be a PinholeSplined
-            or OpenCV instance.
+        model: Camera model the LUT was built from.
         interpolation: Interpolation mode. One of ``"nearest"``, ``"bilinear"``,
             ``"bicubic"``.
 

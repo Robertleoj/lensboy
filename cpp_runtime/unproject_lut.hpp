@@ -9,9 +9,9 @@
 namespace lensboy {
 
 enum class InterpolationMode {
-    kNearest,
-    kBilinear,
-    kBicubic,
+    NEAREST,
+    BILINEAR,
+    BICUBIC,
 };
 
 struct PixelXY {
@@ -50,13 +50,13 @@ class UnprojectLUT {
     UnprojectLUTQueryResult query(
         double pixel_x,
         double pixel_y,
-        InterpolationMode interpolation = InterpolationMode::kBilinear,
+        InterpolationMode interpolation = InterpolationMode::BICUBIC,
         bool normalize = true
     ) const;
 
     std::vector<UnprojectLUTQueryResult> query(
         std::vector<PixelXY> const& pixels,
-        InterpolationMode interpolation = InterpolationMode::kBilinear,
+        InterpolationMode interpolation = InterpolationMode::BICUBIC,
         bool normalize = true
     ) const;
 

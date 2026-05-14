@@ -312,13 +312,13 @@ UnprojectLUTQueryResult UnprojectLUT::query(
 
     PixelXY xy = {{0.0, 0.0}};
     switch (interpolation) {
-        case InterpolationMode::kNearest:
+        case InterpolationMode::NEAREST:
             xy = query_nearest(gx, gy);
             break;
-        case InterpolationMode::kBilinear:
+        case InterpolationMode::BILINEAR:
             xy = query_bilinear(gx, gy);
             break;
-        case InterpolationMode::kBicubic:
+        case InterpolationMode::BICUBIC:
             xy = query_bicubic(gx, gy);
             break;
     }

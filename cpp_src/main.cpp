@@ -246,8 +246,8 @@ PYBIND11_MODULE(
         &lensboy::seeded_normalize_opencv,
         py::arg("seed_pixels"),
         py::arg("seed_normals"),
-        py::arg("seed_w"),
-        py::arg("seed_h"),
+        py::arg("seed_width"),
+        py::arg("seed_height"),
         py::arg("query_pixels"),
         py::arg("intrinsics")
     );
@@ -257,8 +257,8 @@ PYBIND11_MODULE(
         &lensboy::seeded_normalize_splined,
         py::arg("seed_pixels"),
         py::arg("seed_normals"),
-        py::arg("seed_w"),
-        py::arg("seed_h"),
+        py::arg("seed_width"),
+        py::arg("seed_height"),
         py::arg("query_pixels"),
         py::arg("config"),
         py::arg("intrinsics")

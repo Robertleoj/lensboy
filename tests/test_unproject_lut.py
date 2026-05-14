@@ -530,17 +530,17 @@ def test_unproject_lut_cpp_smoke(tmp_path: Path) -> None:
                 auto const q0 = lut.query(
                     4.25,
                     3.5,
-                    lensboy::InterpolationMode::kBilinear
+                    lensboy::InterpolationMode::BILINEAR
                 );
                 auto const q1 = lut.query(
                     -1.0,
                     2.0,
-                    lensboy::InterpolationMode::kBilinear
+                    lensboy::InterpolationMode::BILINEAR
                 );
                 auto const q2 = lut.query(
                     0.0,
                     2.0,
-                    lensboy::InterpolationMode::kBicubic
+                    lensboy::InterpolationMode::BICUBIC
                 );
 
                 std::cout << std::setprecision(17);
