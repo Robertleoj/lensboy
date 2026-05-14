@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from lensboy import lensboy_bindings as lbb
+from lensboy.camera_models.opencv import OpenCV
+from lensboy.camera_models.pinhole_splined import PinholeSplined
+
 if TYPE_CHECKING:
     from lensboy.camera_models.base_model import CameraModel
-    from lensboy.camera_models.opencv import OpenCV
-    from lensboy.camera_models.pinhole_splined import PinholeSplined
 
 _METADATA_FILENAME = "metadata.json"
 _XY_GRID_FILENAME = "xy_grid.npy"
@@ -79,8 +81,8 @@ def _compute_seed_grid(
         camera_model: Camera model with ``project_points`` and FOV properties.
 
     Returns:
-        Tuple of (seed_pixels, seed_normals, seed_w, seed_h) where pixels and
-        normals have shape ``(seed_w * seed_h, 2)``.
+        Tuple of (seed_pixels, seed_normals, seed_width, seed_height) where
+        pixels and normals have shape ``(seed_width * seed_height, 2)``.
     """
     fov_x_rad = camera_model.fov_deg_x * math.pi / 180.0
     fov_y_rad = camera_model.fov_deg_y * math.pi / 180.0
@@ -97,14 +99,14 @@ def _compute_seed_grid(
     aspect = half_x / half_y if half_y > 0 else 1.0
     seed_long = max(w, h) // 4
     if aspect >= 1.0:
-        seed_w = seed_long
-        seed_h = max(4, int(round(seed_long / aspect)))
+        seed_width = seed_long
+        seed_height = max(4, int(round(seed_long / aspect)))
     else:
-        seed_h = seed_long
-        seed_w = max(4, int(round(seed_long * aspect)))
+        seed_height = seed_long
+        seed_width = max(4, int(round(seed_long * aspect)))
 
-    sx = np.linspace(-half_x, half_x, seed_w, dtype=np.float64)
-    sy = np.linspace(-half_y, half_y, seed_h, dtype=np.float64)
+    sx = np.linspace(-half_x, half_x, seed_width, dtype=np.float64)
+    sy = np.linspace(-half_y, half_y, seed_height, dtype=np.float64)
     gsx, gsy = np.meshgrid(sx, sy, indexing="xy")
     flat_sx = gsx.ravel()
     flat_sy = gsy.ravel()
@@ -130,7 +132,64 @@ def _compute_seed_grid(
     seed_normals = np.ascontiguousarray(normals_xy, dtype=np.float64)
     seed_pixels = np.ascontiguousarray(seed_pixels, dtype=np.float64)
 
-    return seed_pixels, seed_normals, seed_w, seed_h
+    return seed_pixels, seed_normals, seed_width, seed_height
+
+
+def _seeded_normalize(
+    camera_model: OpenCV | PinholeSplined,
+    seed_pixels: np.ndarray,
+    seed_normals: np.ndarray,
+    seed_width: int,
+    seed_height: int,
+    query_pixels: np.ndarray,
+) -> np.ndarray:
+    """Batch-unproject pixel coordinates with a seeded Newton solver.
+
+    Dispatches to the appropriate C++ binding based on the camera model type.
+
+    Args:
+        camera_model: OpenCV or PinholeSplined model to unproject through.
+        seed_pixels: Seed-grid pixel locations, shape
+            ``(seed_width * seed_height, 2)``.
+        seed_normals: Normalized rays for each seed pixel, shape
+            ``(seed_width * seed_height, 2)``.
+        seed_width: Seed grid width.
+        seed_height: Seed grid height.
+        query_pixels: Pixels to unproject, shape ``(N, 2)``.
+
+    Returns:
+        Camera-frame rays with shape ``(N, 3)`` and z=1.
+    """
+    if isinstance(camera_model, OpenCV):
+        dist = np.asarray(camera_model.distortion_coeffs, dtype=np.float64)
+        if len(dist) < 14:
+            dist = np.pad(dist, (0, 14 - len(dist)))
+        intrinsics = np.concatenate(
+            [
+                np.array(
+                    [camera_model.fx, camera_model.fy, camera_model.cx, camera_model.cy],
+                    dtype=np.float64,
+                ),
+                dist[:14],
+            ]
+        )
+        return lbb.seeded_normalize_opencv(
+            seed_pixels,
+            seed_normals,
+            seed_width,
+            seed_height,
+            query_pixels,
+            intrinsics,
+        )
+    return lbb.seeded_normalize_splined(
+        seed_pixels,
+        seed_normals,
+        seed_width,
+        seed_height,
+        query_pixels,
+        camera_model._cpp_config(),
+        camera_model._cpp_params(),
+    )
 
 
 def _sample_xy_grid_seeded(
@@ -153,12 +212,10 @@ def _sample_xy_grid_seeded(
     Returns:
         Sampled xy grid, shape ``(grid_height, grid_width, 2)``.
     """
-    try:
-        seeded_normalize = camera_model._seeded_normalize  # type: ignore[attr-defined]
-    except AttributeError as exc:
+    if not isinstance(camera_model, (OpenCV, PinholeSplined)):
         raise TypeError(
             "UnprojectLUT is only supported for OpenCV and PinholeSplined models."
-        ) from exc
+        )
 
     grid_width = len(x_coords)
     grid_height = len(y_coords)
@@ -168,9 +225,16 @@ def _sample_xy_grid_seeded(
         np.column_stack([gx.ravel(), gy.ravel()]), dtype=np.float64
     )
 
-    seed_pixels, seed_normals, seed_w, seed_h = _compute_seed_grid(camera_model)  # type: ignore[arg-type]
+    seed_pixels, seed_normals, seed_width, seed_height = _compute_seed_grid(camera_model)
 
-    rays = seeded_normalize(seed_pixels, seed_normals, seed_w, seed_h, query_pixels)
+    rays = _seeded_normalize(
+        camera_model,
+        seed_pixels,
+        seed_normals,
+        seed_width,
+        seed_height,
+        query_pixels,
+    )
 
     xy = np.asarray(rays[:, :2], dtype=np.float64)
     return xy.reshape(grid_height, grid_width, 2)

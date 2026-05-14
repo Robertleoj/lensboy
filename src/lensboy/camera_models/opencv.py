@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 import cv2
 import numpy as np
 
-from lensboy import lensboy_bindings as lbb
 from lensboy.camera_models.base_model import CameraModel, CameraModelConfig
 
 if TYPE_CHECKING:
@@ -229,40 +228,6 @@ class OpenCV(CameraModel):
             float(self.fy),
             float(self.cx),
             float(self.cy),
-        )
-
-    def _seeded_normalize(
-        self,
-        seed_pixels: np.ndarray,
-        seed_normals: np.ndarray,
-        seed_w: int,
-        seed_h: int,
-        query_pixels: np.ndarray,
-    ) -> np.ndarray:
-        """Batch-unproject pixel coordinates with a seeded Newton solver.
-
-        Args:
-            seed_pixels: Seed-grid pixel locations, shape ``(seed_w * seed_h, 2)``.
-            seed_normals: Normalized rays for each seed pixel, shape
-                ``(seed_w * seed_h, 2)``.
-            seed_w: Seed grid width.
-            seed_h: Seed grid height.
-            query_pixels: Pixels to unproject, shape ``(N, 2)``.
-
-        Returns:
-            Camera-frame rays with shape ``(N, 3)`` and z=1.
-        """
-        dist = np.asarray(self.distortion_coeffs, dtype=np.float64)
-        if len(dist) < 14:
-            dist = np.pad(dist, (0, 14 - len(dist)))
-        intrinsics = np.concatenate(
-            [
-                np.array([self.fx, self.fy, self.cx, self.cy], dtype=np.float64),
-                dist[:14],
-            ]
-        )
-        return lbb.seeded_normalize_opencv(
-            seed_pixels, seed_normals, seed_w, seed_h, query_pixels, intrinsics
         )
 
     def get_unproject_lut(

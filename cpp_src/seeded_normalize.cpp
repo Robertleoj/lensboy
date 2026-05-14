@@ -102,16 +102,15 @@ class SeedGrid {
         pixel_x_min_ = pixel_x_min;
         pixel_y_min_ = pixel_y_min;
         grid_width_ =
-            (int)std::ceil((pixel_x_max - pixel_x_min) * inverse_cell_size_) + 1;
+            (int)std::ceil((pixel_x_max - pixel_x_min) * inverse_cell_size_) +
+            1;
         grid_height_ =
-            (int)std::ceil((pixel_y_max - pixel_y_min) * inverse_cell_size_) + 1;
+            (int)std::ceil((pixel_y_max - pixel_y_min) * inverse_cell_size_) +
+            1;
 
         // Flat array, each cell stores up to CELL_CAPACITY indices (enough for
         // ~1 point per cell). Use -1 as sentinel.
-        cells_.assign(
-            (size_t)grid_width_ * grid_height_ * CELL_CAPACITY,
-            -1
-        );
+        cells_.assign((size_t)grid_width_ * grid_height_ * CELL_CAPACITY, -1);
 
         for (int i = 0; i < num_seeds; i++) {
             double seed_x = pixel_xy[i * 2];
@@ -160,9 +159,8 @@ class SeedGrid {
                     double delta_pixel_x = query_x - pixel_xy[seed_index * 2];
                     double delta_pixel_y =
                         query_y - pixel_xy[seed_index * 2 + 1];
-                    double distance_squared =
-                        delta_pixel_x * delta_pixel_x +
-                        delta_pixel_y * delta_pixel_y;
+                    double distance_squared = delta_pixel_x * delta_pixel_x +
+                                              delta_pixel_y * delta_pixel_y;
                     if (distance_squared < best_distance_squared) {
                         best_distance_squared = distance_squared;
                         best_index = seed_index;
@@ -203,15 +201,16 @@ class SeedGrid {
 };
 
 // ---------------------------------------------------------------------------
-// Inverse-distance weighted interpolation from the 4 quad corners.
+// Bilinear interpolation of seed normals over the quad surrounding a query.
 //
 // The NN tells us grid node (nearest_index_x, nearest_index_y). The query
 // pixel's position relative to that node picks one of the 4 adjacent quads.
-// Then IDW over the 4 corners of that quad gives the initial guess -- no
-// iteration needed.
+// Local (fractional_x, fractional_y) coords inside that quad are recovered by
+// projecting the query onto the quad's two edge vectors, then we bilinearly
+// interpolate the 4 corner seed-normals -- no iteration needed.
 // ---------------------------------------------------------------------------
 
-static bool idw_interp_from_nn(
+static bool bilinear_interpolate_normal_in_quad(
     double pixel_x,
     double pixel_y,
     int nearest_index,
@@ -272,18 +271,16 @@ static bool idw_interp_from_nn(
         0.0,
         std::min(
             1.0,
-            (query_offset_x * edge_y_pixel_y -
-             edge_y_pixel_x * query_offset_y) *
-                inverse_determinant
+            (query_offset_x * edge_y_pixel_y - edge_y_pixel_x * query_offset_y
+            ) * inverse_determinant
         )
     );
     double fractional_y = std::max(
         0.0,
         std::min(
             1.0,
-            (edge_x_pixel_x * query_offset_y -
-             query_offset_x * edge_x_pixel_y) *
-                inverse_determinant
+            (edge_x_pixel_x * query_offset_y - query_offset_x * edge_x_pixel_y
+            ) * inverse_determinant
         )
     );
 
@@ -405,9 +402,8 @@ static void refine_opencv(
         double inverse_determinant = 1.0 / determinant;
         normalized_x -= inverse_determinant *
                         (jacobian_y_y * residual_x - jacobian_x_y * residual_y);
-        normalized_y -=
-            inverse_determinant *
-            (-jacobian_y_x * residual_x + jacobian_x_x * residual_y);
+        normalized_y -= inverse_determinant * (-jacobian_y_x * residual_x +
+                                               jacobian_x_x * residual_y);
     }
 }
 
@@ -431,8 +427,10 @@ struct SplineConstants {
         const double fov_rad_y = config->fov_deg_y * M_PI / 180.0;
         stereo_half_range_x = stereo_half_range(fov_rad_x);
         stereo_half_range_y = stereo_half_range(fov_rad_y);
-        stereo_to_grid_scale_x = (num_knots_x - 3) / (2.0 * stereo_half_range_x);
-        stereo_to_grid_scale_y = (num_knots_y - 3) / (2.0 * stereo_half_range_y);
+        stereo_to_grid_scale_x =
+            (num_knots_x - 3) / (2.0 * stereo_half_range_x);
+        stereo_to_grid_scale_y =
+            (num_knots_y - 3) / (2.0 * stereo_half_range_y);
     }
 };
 
@@ -571,12 +569,10 @@ static void refine_splined(
                 break;
             }
             double inverse_determinant = 1.0 / determinant;
-            normalized_x -=
-                inverse_determinant *
-                (jacobian_y_y * residual_x - jacobian_x_y * residual_y);
-            normalized_y -=
-                inverse_determinant *
-                (-jacobian_y_x * residual_x + jacobian_x_x * residual_y);
+            normalized_x -= inverse_determinant * (jacobian_y_y * residual_x -
+                                                   jacobian_x_y * residual_y);
+            normalized_y -= inverse_determinant * (-jacobian_y_x * residual_x +
+                                                   jacobian_x_x * residual_y);
         }
 
         normalized_to_stereographic(
@@ -615,7 +611,8 @@ static void refine_splined(
 }
 
 // ---------------------------------------------------------------------------
-// Shared kernel: validation, NN+IDW initial guess, parallel Newton refinement.
+// Shared kernel: validation, NN + bilinear initial guess, parallel Newton
+// refinement.
 // Per-model parts (intrinsics parsing, residual+jacobian) live in the entry
 // points and the refine_* functions above.
 // ---------------------------------------------------------------------------
@@ -686,7 +683,7 @@ py::array_t<double> run_seeded_normalize(
         int nearest_index = grid.nearest(pixel_x, pixel_y, seed_pixels);
         if (nearest_index >= 0) {
             double interp_normalized_x, interp_normalized_y;
-            if (idw_interp_from_nn(
+            if (bilinear_interpolate_normal_in_quad(
                     pixel_x,
                     pixel_y,
                     nearest_index,
@@ -832,10 +829,8 @@ py::array_t<double> seeded_normalize_splined(
                  cx = pinhole_params[2], cy = pinhole_params[3];
     require(fx != 0.0 && fy != 0.0, "fx/fy must be non-zero");
 
-    const double* dx_grid_data =
-        static_cast<const double*>(dx_grid_buffer.ptr);
-    const double* dy_grid_data =
-        static_cast<const double*>(dy_grid_buffer.ptr);
+    const double* dx_grid_data = static_cast<const double*>(dx_grid_buffer.ptr);
+    const double* dy_grid_data = static_cast<const double*>(dy_grid_buffer.ptr);
 
     const int num_seeds = (int)seed_pixels_buffer.shape[0];
     const ssize_t num_queries = query_pixels_buffer.shape[0];
