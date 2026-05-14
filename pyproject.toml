@@ -56,10 +56,7 @@ VCPKG_ROOT=$HOME/vcpkg $HOME/vcpkg/vcpkg install --no-print-usage
 
 [tool.cibuildwheel.macos.environment]
 VCPKG_ROOT = "$HOME/vcpkg"
-OpenMP_ROOT = "/opt/homebrew/opt/libomp"
-CFLAGS = "-Xpreprocessor -fopenmp"
-CXXFLAGS = "-Xpreprocessor -fopenmp"
-LDFLAGS = "-L/opt/homebrew/opt/libomp/lib -lomp"
+CMAKE_ARGS = "-DOpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include' -DOpenMP_CXX_LIB_NAMES=omp -DOpenMP_omp_LIBRARY=/opt/homebrew/opt/libomp/lib/libomp.dylib"
 
 [dependency-groups]
 dev = [
