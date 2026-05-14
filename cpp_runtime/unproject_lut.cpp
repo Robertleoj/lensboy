@@ -68,26 +68,20 @@ UnprojectLUT::UnprojectLUT(
     std::vector<double> xy_grid
 ) : metadata_(std::move(metadata)),
     xy_grid_(std::move(xy_grid)) {
-    if (metadata_.image_width == 0 or metadata_.image_height == 0) {
-        throw std::runtime_error("Image dimensions must be positive.");
+    if (metadata_.image_width < 2 or metadata_.image_height < 2) {
+        throw std::runtime_error("Image dimensions must be at least 2.");
     }
     if (metadata_.grid_width < 2 or metadata_.grid_height < 2) {
         throw std::runtime_error("Grid dimensions must be at least 2 in each axis.");
-    }
-    if (
-        metadata_.grid_x_max <= metadata_.grid_x_min or
-        metadata_.grid_y_max <= metadata_.grid_y_min
-    ) {
-        throw std::runtime_error("Grid extents must have positive span.");
     }
     if (xy_grid_.size() != metadata_.grid_width * metadata_.grid_height * 2) {
         throw std::runtime_error("xy_grid size does not match metadata.");
     }
 
     grid_scale_x_ = static_cast<double>(metadata_.grid_width - 1) /
-                    (metadata_.grid_x_max - metadata_.grid_x_min);
+                    static_cast<double>(metadata_.image_width - 1);
     grid_scale_y_ = static_cast<double>(metadata_.grid_height - 1) /
-                    (metadata_.grid_y_max - metadata_.grid_y_min);
+                    static_cast<double>(metadata_.image_height - 1);
 }
 
 UnprojectLUT UnprojectLUT::load(
@@ -144,10 +138,6 @@ UnprojectLUT UnprojectLUT::load(
         metadata.at("image_height").get<std::size_t>();
     lut_metadata.grid_width = grid_width;
     lut_metadata.grid_height = grid_height;
-    lut_metadata.grid_x_min = metadata.at("grid_x_min").get<double>();
-    lut_metadata.grid_x_max = metadata.at("grid_x_max").get<double>();
-    lut_metadata.grid_y_min = metadata.at("grid_y_min").get<double>();
-    lut_metadata.grid_y_max = metadata.at("grid_y_max").get<double>();
     lut_metadata.lensboy_version = std::move(lensboy_version);
 
     return UnprojectLUT(std::move(lut_metadata), std::move(xy_grid));
@@ -175,13 +165,13 @@ PixelXY UnprojectLUT::sample_node(
 double UnprojectLUT::grid_coordinate_x(
     double pixel_x
 ) const noexcept {
-    return (pixel_x - metadata_.grid_x_min) * grid_scale_x_;
+    return pixel_x * grid_scale_x_;
 }
 
 double UnprojectLUT::grid_coordinate_y(
     double pixel_y
 ) const noexcept {
-    return (pixel_y - metadata_.grid_y_min) * grid_scale_y_;
+    return pixel_y * grid_scale_y_;
 }
 
 PixelXY UnprojectLUT::query_nearest(
@@ -298,10 +288,11 @@ UnprojectLUTQueryResult UnprojectLUT::query(
     InterpolationMode interpolation,
     bool const normalize
 ) const {
-    bool const inside = pixel_x >= metadata_.grid_x_min and
-                        pixel_x <= metadata_.grid_x_max and
-                        pixel_y >= metadata_.grid_y_min and
-                        pixel_y <= metadata_.grid_y_max;
+    bool const inside =
+        pixel_x >= 0.0 and
+        pixel_x <= static_cast<double>(metadata_.image_width - 1) and
+        pixel_y >= 0.0 and
+        pixel_y <= static_cast<double>(metadata_.image_height - 1);
 
     if (not inside) {
         return UnprojectLUTQueryResult::invalid();

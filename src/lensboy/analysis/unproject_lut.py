@@ -271,8 +271,8 @@ def compute_lut_error_heatmap(
     exact_xy = cells_grid[:, :, 2:4]
     approx_xy = cells_grid[:, :, 4:6]
 
-    x_edges = np.linspace(lut.grid_x_min, lut.grid_x_max, lut.grid_width)
-    y_edges = np.linspace(lut.grid_y_min, lut.grid_y_max, lut.grid_height)
+    x_edges = np.linspace(0.0, lut.image_width - 1, lut.grid_width)
+    y_edges = np.linspace(0.0, lut.image_height - 1, lut.grid_height)
 
     return UnprojectLUTErrorHeatmap(
         interpolation=interpolation,
@@ -320,10 +320,8 @@ def _max_cell_errors_call(
     mode_int = _INTERP_TO_CPP_MODE[interpolation]
     common_kwargs = {
         "lut_xy_grid": lut.xy_grid,
-        "grid_x_min": lut.grid_x_min,
-        "grid_x_max": lut.grid_x_max,
-        "grid_y_min": lut.grid_y_min,
-        "grid_y_max": lut.grid_y_max,
+        "image_width": lut.image_width,
+        "image_height": lut.image_height,
         "interpolation_mode": mode_int,
         "max_iterations": _OPTIMISER_MAX_ITERS,
         "gradient_tolerance": _OPTIMISER_GRAD_TOL,

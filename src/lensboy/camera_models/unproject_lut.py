@@ -260,12 +260,6 @@ def _grid_size_from_stride(image_size: int, stride: float) -> int:
     return int(math.ceil((image_size - 1) / stride)) + 1
 
 
-def _compute_grid_scale(size: int, minimum: float, maximum: float) -> float:
-    if size == 1 or maximum == minimum:
-        return 0.0
-    return (size - 1) / (maximum - minimum)
-
-
 def _linear_indices_and_weights(
     g: np.ndarray,
     size: int,
@@ -285,31 +279,22 @@ def _linear_indices_and_weights(
 class UnprojectLUT:
     """Regular-grid cache of `normalize_points()` values.
 
-    Stores the x/y components of camera-frame rays on a regular image-space grid.
+    Stores the x/y components of camera-frame rays on a regular image-space
+    grid that always spans ``[0, image_width - 1] x [0, image_height - 1]``.
     Queries interpolate those cached values and return rays of the form
     ``[x, y, 1]``.
+
+    The grid sample count is taken directly from the shape of ``xy_grid``.
 
     Args:
         image_width: Width of the source image in pixels.
         image_height: Height of the source image in pixels.
-        grid_width: Number of cached samples along x.
-        grid_height: Number of cached samples along y.
-        grid_x_min: Minimum pixel x covered by the LUT.
-        grid_x_max: Maximum pixel x covered by the LUT.
-        grid_y_min: Minimum pixel y covered by the LUT.
-        grid_y_max: Maximum pixel y covered by the LUT.
         xy_grid: Cached x/y ray components with shape ``(grid_height, grid_width, 2)``.
         lensboy_version: Package version that produced the LUT.
     """
 
     image_width: int
     image_height: int
-    grid_width: int
-    grid_height: int
-    grid_x_min: float
-    grid_x_max: float
-    grid_y_min: float
-    grid_y_max: float
     xy_grid: np.ndarray
     lensboy_version: str = field(default_factory=lambda: _package_version("lensboy"))
     _grid_scale_x: float = field(init=False, repr=False)
@@ -318,26 +303,27 @@ class UnprojectLUT:
     def __post_init__(self) -> None:
         if self.image_width <= 0 or self.image_height <= 0:
             raise ValueError("image dimensions must be positive.")
-        if self.grid_width <= 0 or self.grid_height <= 0:
-            raise ValueError("grid dimensions must be positive.")
-        if self.grid_x_max < self.grid_x_min or self.grid_y_max < self.grid_y_min:
-            raise ValueError("grid extents must be ordered from min to max.")
 
         grid = np.asarray(self.xy_grid, dtype=np.float64)
-        if grid.shape != (self.grid_height, self.grid_width, 2):
+        if grid.ndim != 3 or grid.shape[2] != 2:
             raise ValueError(
-                "xy_grid must have shape "
-                f"({self.grid_height}, {self.grid_width}, 2), got {grid.shape}."
+                f"xy_grid must have shape (grid_height, grid_width, 2), got {grid.shape}."
             )
+        if grid.shape[0] < 1 or grid.shape[1] < 1:
+            raise ValueError("grid dimensions must be positive.")
         if not np.all(np.isfinite(grid)):
             raise ValueError("xy_grid must contain only finite values.")
         self.xy_grid = np.ascontiguousarray(grid)
 
-        self._grid_scale_x = _compute_grid_scale(
-            self.grid_width, self.grid_x_min, self.grid_x_max
+        self._grid_scale_x = (
+            (self.grid_width - 1) / (self.image_width - 1)
+            if self.grid_width > 1 and self.image_width > 1
+            else 0.0
         )
-        self._grid_scale_y = _compute_grid_scale(
-            self.grid_height, self.grid_y_min, self.grid_y_max
+        self._grid_scale_y = (
+            (self.grid_height - 1) / (self.image_height - 1)
+            if self.grid_height > 1 and self.image_height > 1
+            else 0.0
         )
 
     def __repr__(self) -> str:
@@ -345,6 +331,16 @@ class UnprojectLUT:
             f"UnprojectLUT(image={self.image_width}x{self.image_height}, "
             f"grid={self.grid_width}x{self.grid_height})"
         )
+
+    @property
+    def grid_width(self) -> int:
+        """Number of cached samples along x."""
+        return int(self.xy_grid.shape[1])
+
+    @property
+    def grid_height(self) -> int:
+        """Number of cached samples along y."""
+        return int(self.xy_grid.shape[0])
 
     @property
     def grid_size_wh(self) -> tuple[int, int]:
@@ -356,28 +352,19 @@ class UnprojectLUT:
         return self.grid_width, self.grid_height
 
     @property
-    def grid_extents_xy(self) -> tuple[float, float, float, float]:
-        """Return the covered pixel domain.
-
-        Returns:
-            ``(x_min, x_max, y_min, y_max)`` in pixel coordinates.
-        """
-        return self.grid_x_min, self.grid_x_max, self.grid_y_min, self.grid_y_max
-
-    @property
     def grid_stride_xy(self) -> tuple[float, float]:
         """Return the actual spacing between neighboring cached samples.
 
         Returns:
             ``(stride_x, stride_y)`` in pixel coordinates. These values are derived
-            from the grid extents and sample counts, so they may be fractional.
+            from the image dimensions and sample counts, so they may be fractional.
         """
         stride_x = 0.0
         if self.grid_width > 1:
-            stride_x = (self.grid_x_max - self.grid_x_min) / (self.grid_width - 1)
+            stride_x = (self.image_width - 1) / (self.grid_width - 1)
         stride_y = 0.0
         if self.grid_height > 1:
-            stride_y = (self.grid_y_max - self.grid_y_min) / (self.grid_height - 1)
+            stride_y = (self.image_height - 1) / (self.grid_height - 1)
         return float(stride_x), float(stride_y)
 
     @staticmethod
@@ -429,18 +416,11 @@ class UnprojectLUT:
             y_coords=y_coords,
         )
 
-        lut = UnprojectLUT(
+        return UnprojectLUT(
             image_width=camera_model.image_width,
             image_height=camera_model.image_height,
-            grid_width=grid_width,
-            grid_height=grid_height,
-            grid_x_min=0.0,
-            grid_x_max=float(camera_model.image_width - 1),
-            grid_y_min=0.0,
-            grid_y_max=float(camera_model.image_height - 1),
             xy_grid=xy_grid,
         )
-        return lut
 
     def save(self, dir_path: Path | str) -> None:
         """Serialize the LUT to a directory.
@@ -458,10 +438,6 @@ class UnprojectLUT:
             "lensboy-version": self.lensboy_version,
             "image_width": self.image_width,
             "image_height": self.image_height,
-            "grid_x_min": self.grid_x_min,
-            "grid_x_max": self.grid_x_max,
-            "grid_y_min": self.grid_y_min,
-            "grid_y_max": self.grid_y_max,
         }
         (p / _METADATA_FILENAME).write_text(json.dumps(metadata, indent=4))
 
@@ -489,17 +465,10 @@ class UnprojectLUT:
             )
 
         xy_grid = np.load(p / _XY_GRID_FILENAME, allow_pickle=False).astype(np.float64)
-        grid_height, grid_width = xy_grid.shape[:2]
 
         return UnprojectLUT(
             image_width=int(metadata["image_width"]),
             image_height=int(metadata["image_height"]),
-            grid_width=int(grid_width),
-            grid_height=int(grid_height),
-            grid_x_min=float(metadata["grid_x_min"]),
-            grid_x_max=float(metadata["grid_x_max"]),
-            grid_y_min=float(metadata["grid_y_min"]),
-            grid_y_max=float(metadata["grid_y_max"]),
             xy_grid=xy_grid,
             lensboy_version=version,
         )
@@ -542,10 +511,10 @@ class UnprojectLUT:
 
     def _valid_mask(self, pixels_xy: np.ndarray) -> np.ndarray:
         return (
-            (pixels_xy[:, 0] >= self.grid_x_min)
-            & (pixels_xy[:, 0] <= self.grid_x_max)
-            & (pixels_xy[:, 1] >= self.grid_y_min)
-            & (pixels_xy[:, 1] <= self.grid_y_max)
+            (pixels_xy[:, 0] >= 0.0)
+            & (pixels_xy[:, 0] <= self.image_width - 1)
+            & (pixels_xy[:, 1] >= 0.0)
+            & (pixels_xy[:, 1] <= self.image_height - 1)
         )
 
     def _interpolate_xy(
@@ -557,8 +526,8 @@ class UnprojectLUT:
             return np.empty((0, 2), dtype=np.float64)
 
         grid_xy = np.empty_like(pixels_xy)
-        grid_xy[:, 0] = (pixels_xy[:, 0] - self.grid_x_min) * self._grid_scale_x
-        grid_xy[:, 1] = (pixels_xy[:, 1] - self.grid_y_min) * self._grid_scale_y
+        grid_xy[:, 0] = pixels_xy[:, 0] * self._grid_scale_x
+        grid_xy[:, 1] = pixels_xy[:, 1] * self._grid_scale_y
 
         if interpolation == "nearest":
             return self._query_nearest(grid_xy)

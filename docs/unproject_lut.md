@@ -145,17 +145,14 @@ containing two files:
 {
     "lensboy-version": "3.x.y",
     "image_width": 3088,
-    "image_height": 2064,
-    "grid_x_min": 0.0,
-    "grid_x_max": 3087.0,
-    "grid_y_min": 0.0,
-    "grid_y_max": 2063.0
+    "image_height": 2064
 }
 ```
 
-Grid sample count comes from the `xy_grid.npy` shape, not from
-`metadata.json`. `load()` rejects LUTs whose `lensboy-version` has a major
-version below 3.
+The LUT always covers the full image.
+
+Grid sample count comes from the `xy_grid.npy` shape. `load()` rejects
+LUTs whose `lensboy-version` has a major version below 3.
 
 The LUT is a pure runtime artifact - it does not store the source camera
 model. Keep the model around (or rebuild it from your calibration) if you

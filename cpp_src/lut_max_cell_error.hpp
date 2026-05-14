@@ -25,10 +25,8 @@ py::array_t<double> max_cell_errors_pinhole_splined(
     PinholeSplinedConfig& config,
     PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> lut_xy_grid,
-    double grid_x_min,
-    double grid_x_max,
-    double grid_y_min,
-    double grid_y_max,
+    int image_width,
+    int image_height,
     int interpolation_mode,
     int max_iters,
     double grad_tol
@@ -37,10 +35,8 @@ py::array_t<double> max_cell_errors_pinhole_splined(
 py::array_t<double> max_cell_errors_opencv(
     py::array_t<double, py::array::c_style | py::array::forcecast> intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> lut_xy_grid,
-    double grid_x_min,
-    double grid_x_max,
-    double grid_y_min,
-    double grid_y_max,
+    int image_width,
+    int image_height,
     int interpolation_mode,
     int max_iters,
     double grad_tol

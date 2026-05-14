@@ -80,8 +80,6 @@ inline void interp_lut_nearest(
     const double* lut_xy_grid,
     int grid_width,
     int grid_height,
-    double grid_x_min,
-    double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
     const T& pixel_x,
@@ -91,8 +89,8 @@ inline void interp_lut_nearest(
 ) {
     const double pixel_x_scalar = scalar_value(pixel_x);
     const double pixel_y_scalar = scalar_value(pixel_y);
-    const double grid_x = (pixel_x_scalar - grid_x_min) * grid_scale_x;
-    const double grid_y = (pixel_y_scalar - grid_y_min) * grid_scale_y;
+    const double grid_x = pixel_x_scalar * grid_scale_x;
+    const double grid_y = pixel_y_scalar * grid_scale_y;
     // Match numpy's np.rint (round-half-to-even) so the C++ optimiser and
     // the Python LUT query agree at exact half-integer grid coordinates.
     // std::lround rounds half-away-from-zero and disagreed at .5 values.
@@ -111,8 +109,6 @@ inline void interp_lut_bilinear(
     const double* lut_xy_grid,
     int grid_width,
     int grid_height,
-    double grid_x_min,
-    double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
     const T& pixel_x,
@@ -120,8 +116,8 @@ inline void interp_lut_bilinear(
     T& out_x,
     T& out_y
 ) {
-    const T grid_x = (pixel_x - T(grid_x_min)) * T(grid_scale_x);
-    const T grid_y = (pixel_y - T(grid_y_min)) * T(grid_scale_y);
+    const T grid_x = pixel_x * T(grid_scale_x);
+    const T grid_y = pixel_y * T(grid_scale_y);
 
     const T grid_x_clamped =
         clamp_T(grid_x, T(0.0), T(static_cast<double>(grid_width - 1)));
@@ -170,8 +166,6 @@ inline void interp_lut_bicubic(
     const double* lut_xy_grid,
     int grid_width,
     int grid_height,
-    double grid_x_min,
-    double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
     const T& pixel_x,
@@ -184,8 +178,6 @@ inline void interp_lut_bicubic(
             lut_xy_grid,
             grid_width,
             grid_height,
-            grid_x_min,
-            grid_y_min,
             grid_scale_x,
             grid_scale_y,
             pixel_x,
@@ -196,8 +188,8 @@ inline void interp_lut_bicubic(
         return;
     }
 
-    const T grid_x = (pixel_x - T(grid_x_min)) * T(grid_scale_x);
-    const T grid_y = (pixel_y - T(grid_y_min)) * T(grid_scale_y);
+    const T grid_x = pixel_x * T(grid_scale_x);
+    const T grid_y = pixel_y * T(grid_scale_y);
     const T grid_x_clamped =
         clamp_T(grid_x, T(0.0), T(static_cast<double>(grid_width - 1)));
     const T grid_y_clamped =
@@ -216,8 +208,6 @@ inline void interp_lut_bicubic(
             lut_xy_grid,
             grid_width,
             grid_height,
-            grid_x_min,
-            grid_y_min,
             grid_scale_x,
             grid_scale_y,
             pixel_x,
@@ -258,8 +248,6 @@ inline void interp_lut_dispatch(
     const double* lut_xy_grid,
     int grid_width,
     int grid_height,
-    double grid_x_min,
-    double grid_y_min,
     double grid_scale_x,
     double grid_scale_y,
     const T& pixel_x,
@@ -272,8 +260,6 @@ inline void interp_lut_dispatch(
             lut_xy_grid,
             grid_width,
             grid_height,
-            grid_x_min,
-            grid_y_min,
             grid_scale_x,
             grid_scale_y,
             pixel_x,
@@ -286,8 +272,6 @@ inline void interp_lut_dispatch(
             lut_xy_grid,
             grid_width,
             grid_height,
-            grid_x_min,
-            grid_y_min,
             grid_scale_x,
             grid_scale_y,
             pixel_x,
@@ -300,8 +284,6 @@ inline void interp_lut_dispatch(
             lut_xy_grid,
             grid_width,
             grid_height,
-            grid_x_min,
-            grid_y_min,
             grid_scale_x,
             grid_scale_y,
             pixel_x,
@@ -417,8 +399,6 @@ struct CellMaximizer {
     const double* lut_xy_grid;
     int grid_width;
     int grid_height;
-    double grid_x_min;
-    double grid_y_min;
     double grid_scale_x;
     double grid_scale_y;
     int max_iterations;
@@ -441,8 +421,6 @@ struct CellMaximizer {
             lut_xy_grid,
             grid_width,
             grid_height,
-            grid_x_min,
-            grid_y_min,
             grid_scale_x,
             grid_scale_y,
             pixel_x,
@@ -698,8 +676,6 @@ struct CellMaximizer {
             lut_xy_grid,
             grid_width,
             grid_height,
-            grid_x_min,
-            grid_y_min,
             grid_scale_x,
             grid_scale_y,
             peak_pixel_x,
@@ -722,10 +698,8 @@ py::array_t<double> run_max_cell_errors(
     const double* lut_xy_grid,
     int grid_width,
     int grid_height,
-    double grid_x_min,
-    double grid_x_max,
-    double grid_y_min,
-    double grid_y_max,
+    int image_width,
+    int image_height,
     int interpolation_mode,
     int max_iterations,
     double gradient_tolerance
@@ -735,15 +709,19 @@ py::array_t<double> run_max_cell_errors(
         "LUT grid dimensions must be at least 2"
     );
     require(
+        image_width >= 2 && image_height >= 2,
+        "image dimensions must be at least 2"
+    );
+    require(
         interpolation_mode >= 0 && interpolation_mode <= 2,
         "interpolation_mode must be 0 (nearest), 1 (bilinear), or 2 (bicubic)"
     );
     require(max_iterations > 0, "max_iterations must be positive");
 
-    const double grid_scale_x =
-        static_cast<double>(grid_width - 1) / (grid_x_max - grid_x_min);
-    const double grid_scale_y =
-        static_cast<double>(grid_height - 1) / (grid_y_max - grid_y_min);
+    const double grid_scale_x = static_cast<double>(grid_width - 1) /
+                                static_cast<double>(image_width - 1);
+    const double grid_scale_y = static_cast<double>(grid_height - 1) /
+                                static_cast<double>(image_height - 1);
 
     const int num_cells_x = grid_width - 1;
     const int num_cells_y = grid_height - 1;
@@ -760,8 +738,6 @@ py::array_t<double> run_max_cell_errors(
         lut_xy_grid,
         grid_width,
         grid_height,
-        grid_x_min,
-        grid_y_min,
         grid_scale_x,
         grid_scale_y,
         max_iterations,
@@ -779,12 +755,10 @@ py::array_t<double> run_max_cell_errors(
             const ssize_t cell_index =
                 static_cast<ssize_t>(cell_index_y) * num_cells_x + cell_index_x;
 
-            const double cell_x0 = grid_x_min + cell_index_x * pixel_span_x;
-            const double cell_x1 =
-                grid_x_min + (cell_index_x + 1) * pixel_span_x;
-            const double cell_y0 = grid_y_min + cell_index_y * pixel_span_y;
-            const double cell_y1 =
-                grid_y_min + (cell_index_y + 1) * pixel_span_y;
+            const double cell_x0 = cell_index_x * pixel_span_x;
+            const double cell_x1 = (cell_index_x + 1) * pixel_span_x;
+            const double cell_y0 = cell_index_y * pixel_span_y;
+            const double cell_y1 = (cell_index_y + 1) * pixel_span_y;
 
             const double* normal_x0_y0 =
                 lut_xy_grid + (cell_index_y * grid_width + cell_index_x) * 2;
@@ -873,10 +847,8 @@ py::array_t<double> max_cell_errors_pinhole_splined(
     PinholeSplinedConfig& config,
     PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> lut_xy_grid,
-    double grid_x_min,
-    double grid_x_max,
-    double grid_y_min,
-    double grid_y_max,
+    int image_width,
+    int image_height,
     int interpolation_mode,
     int max_iterations,
     double gradient_tolerance
@@ -936,10 +908,8 @@ py::array_t<double> max_cell_errors_pinhole_splined(
         lut_data,
         grid_width,
         grid_height,
-        grid_x_min,
-        grid_x_max,
-        grid_y_min,
-        grid_y_max,
+        image_width,
+        image_height,
         interpolation_mode,
         max_iterations,
         gradient_tolerance
@@ -971,10 +941,8 @@ inline void project_opencv_n(
 py::array_t<double> max_cell_errors_opencv(
     py::array_t<double, py::array::c_style | py::array::forcecast> intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> lut_xy_grid,
-    double grid_x_min,
-    double grid_x_max,
-    double grid_y_min,
-    double grid_y_max,
+    int image_width,
+    int image_height,
     int interpolation_mode,
     int max_iterations,
     double gradient_tolerance
@@ -1015,10 +983,8 @@ py::array_t<double> max_cell_errors_opencv(
         lut_data,
         grid_width,
         grid_height,
-        grid_x_min,
-        grid_x_max,
-        grid_y_min,
-        grid_y_max,
+        image_width,
+        image_height,
         interpolation_mode,
         max_iterations,
         gradient_tolerance

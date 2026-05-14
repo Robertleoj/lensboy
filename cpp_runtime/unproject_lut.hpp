@@ -23,10 +23,6 @@ struct UnprojectLUTMetadata {
     std::size_t image_height = 0;
     std::size_t grid_width = 0;
     std::size_t grid_height = 0;
-    double grid_x_min = 0.0;
-    double grid_x_max = 0.0;
-    double grid_y_min = 0.0;
-    double grid_y_max = 0.0;
     std::string lensboy_version;
 };
 
