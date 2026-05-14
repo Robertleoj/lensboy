@@ -48,6 +48,7 @@ VCPKG_ROOT = "$HOME/vcpkg"
 
 [tool.cibuildwheel.macos]
 before-all = """
+brew install libomp && \
 git clone https://github.com/microsoft/vcpkg.git $HOME/vcpkg && \
 $HOME/vcpkg/bootstrap-vcpkg.sh -disableMetrics && \
 VCPKG_ROOT=$HOME/vcpkg $HOME/vcpkg/vcpkg install --no-print-usage
@@ -55,6 +56,8 @@ VCPKG_ROOT=$HOME/vcpkg $HOME/vcpkg/vcpkg install --no-print-usage
 
 [tool.cibuildwheel.macos.environment]
 VCPKG_ROOT = "$HOME/vcpkg"
+CMAKE_ARGS = "-DOpenMP_CXX_FLAGS='-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include' -DOpenMP_CXX_LIB_NAMES=omp -DOpenMP_omp_LIBRARY=/opt/homebrew/opt/libomp/lib/libomp.dylib"
+MACOSX_DEPLOYMENT_TARGET = "15.0"
 
 [dependency-groups]
 dev = [

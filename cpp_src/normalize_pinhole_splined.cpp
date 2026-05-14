@@ -33,15 +33,16 @@ static Vec2<double> normalize_single_point(
     constexpr double eps = 1e-12;
 
     // Initial guess: inverse pinhole (ignore spline distortion)
-    double nx = (target_u - cx) / fx;
-    double ny = (target_v - cy) / fy;
+    double normalized_x = (target_u - cx) / fx;
+    double normalized_y = (target_v - cy) / fy;
 
     for (int rebuild = 0; rebuild < max_rebuilds; rebuild++) {
         // Convert to stereographic for spline lookup
         double sx, sy;
-        normalized_to_stereographic(nx, ny, sx, sy);
+        normalized_to_stereographic(normalized_x, normalized_y, sx, sy);
 
-        // Compute cell index for current (nx, ny) in stereographic space
+        // Compute cell index for current (normalized_x, normalized_y) in
+        // stereographic space
         double gx = std::max(
             0.0,
             std::min(1.0 + (sx + half_x) * x_scale, Nx - 1.0 - eps)
@@ -68,12 +69,17 @@ static Vec2<double> normalize_single_point(
 
         // Newton iterations with autodiff via Ceres Jets
         for (int iter = 0; iter < max_newton; iter++) {
-            Jet jnx(nx, 0);
-            Jet jny(ny, 1);
+            Jet jet_normalized_x(normalized_x, 0);
+            Jet jet_normalized_y(normalized_y, 1);
 
             // Normalized coords -> stereographic -> spline coords
             Jet jsx, jsy;
-            normalized_to_stereographic(jnx, jny, jsx, jsy);
+            normalized_to_stereographic(
+                jet_normalized_x,
+                jet_normalized_y,
+                jsx,
+                jsy
+            );
 
             Jet jgx = clamp_T(
                 Jet(1.0) + (jsx + Jet(half_x)) * Jet(x_scale),
@@ -106,8 +112,10 @@ static Vec2<double> normalize_single_point(
             }
 
             // Projection residual
-            Jet r0 = Jet(fx) * (jnx + dx_val) + Jet(cx) - Jet(target_u);
-            Jet r1 = Jet(fy) * (jny + dy_val) + Jet(cy) - Jet(target_v);
+            Jet r0 =
+                Jet(fx) * (jet_normalized_x + dx_val) + Jet(cx) - Jet(target_u);
+            Jet r1 =
+                Jet(fy) * (jet_normalized_y + dy_val) + Jet(cy) - Jet(target_v);
 
             const double res0 = r0.a;
             const double res1 = r1.a;
@@ -126,12 +134,12 @@ static Vec2<double> normalize_single_point(
             }
             const double inv_det = 1.0 / det;
 
-            nx -= inv_det * (J11 * res0 - J01 * res1);
-            ny -= inv_det * (-J10 * res0 + J00 * res1);
+            normalized_x -= inv_det * (J11 * res0 - J01 * res1);
+            normalized_y -= inv_det * (-J10 * res0 + J00 * res1);
         }
 
         // Check if the solution moved to a different cell
-        normalized_to_stereographic(nx, ny, sx, sy);
+        normalized_to_stereographic(normalized_x, normalized_y, sx, sy);
         gx = std::max(
             0.0,
             std::min(1.0 + (sx + half_x) * x_scale, Nx - 1.0 - eps)
@@ -148,7 +156,7 @@ static Vec2<double> normalize_single_point(
         }
     }
 
-    return Vec2<double>(nx, ny);
+    return Vec2<double>(normalized_x, normalized_y);
 }
 
 py::array_t<double> normalize_pinhole_splined_points(

@@ -88,3 +88,30 @@ pip install lensboy
 Spline models use B-spline grids instead of polynomial coefficients, so they can fit lenses that OpenCV's model can't. This approach is inspired by [mrcal](https://mrcal.secretsauce.net/).
 
 The calibrated model converts to a pinhole model with undistortion maps, so you can use it with any standard pinhole pipeline.
+
+## Runtime unproject LUTs
+
+Iterative unprojection can be too slow for some applications.
+`UnprojectLUT` caches `normalize_points()` on a regular pixel grid so
+that per-pixel queries reduce to a bicubic interpolation. The cache is
+saved as a directory of `metadata.json` + `xy_grid.npy`, loadable from
+Python or from a small standalone C++ runtime in
+[`cpp_runtime/`](cpp_runtime/).
+
+```python
+import lensboy as lb
+from lensboy.analysis import compute_lut_error_heatmap
+
+model = lb.OpenCV.load("camera.json")
+lut = model.get_unproject_lut(pixel_stride=32)
+lut.save("camera_lut/")
+
+runtime_lut = lb.UnprojectLUT.load("camera_lut/")
+rays, valid_mask = runtime_lut.normalize_points(pixel_coords)
+
+heatmap = compute_lut_error_heatmap(runtime_lut, model)
+```
+
+See the [unproject LUT guide](https://robertleoj.github.io/lensboy/unproject_lut.html)
+for sizing, interpolation modes, the file format, and the C++ runtime.
+There is also a runnable [Jupyter notebook](examples/unproject_lut.ipynb).

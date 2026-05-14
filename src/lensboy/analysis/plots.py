@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from lensboy.analysis.unproject_lut import UnprojectLUTErrorHeatmap
 
 import cv2
 import matplotlib.colors as mcolors
@@ -2143,6 +2146,200 @@ def plot_projection_diff(
         ax_grid.set_ylabel("y [px]")
         ax_grid.set_title(f"Deformation grid ({diff_scale:.0f}x exaggerated)")
 
+    if return_figure:
+        return fig
+    plt.show()
+    return None
+
+
+def _plot_unproject_lut_error_heatmap(
+    heatmap: UnprojectLUTErrorHeatmap,
+    *,
+    title: str | None = None,
+    angular_unit: Literal["deg", "mdeg", "udeg", "rad", "mrad", "urad"] = "mdeg",
+    vmax: float | None = None,
+    show_directions: bool = True,
+    arrow_grid: int = 28,
+    arrow_scale: float = 0.5,
+    constant_arrow_length: bool = False,
+    cmap_name: str = "inferno",
+    figsize: tuple[float, float] = (8.5, 6.0),
+    return_figure: bool = False,
+) -> Figure | None:
+    """Plot an unproject LUT error heatmap.
+
+    Draws the per-cell maximum angular error as a heatmap and can overlay the
+    direction of the local peak x/y interpolation error in each cell. Arrow
+    length is proportional to per-cell error magnitude by default.
+
+    Args:
+        heatmap: In-memory heatmap object.
+        title: Plot title. Uses the archive interpolation mode when omitted.
+        angular_unit: Angular units for the heatmap color scale.
+        vmax: Upper limit of the colorbar in the same units as ``angular_unit``.
+            Cells above this clip to the top colour. ``None`` auto-fits to the
+            data.
+        show_directions: Whether to draw the error-direction arrows.
+        arrow_grid: Approximate maximum number of arrows along the longer heatmap axis.
+        arrow_scale: Arrow length, as a fraction of the spacing between drawn
+            arrows, for the largest-error cell drawn. Other arrows scale down
+            proportionally to their error magnitude (or are all this length when
+            ``constant_arrow_length=True``).
+        constant_arrow_length: If True, draw all arrows the same length
+            regardless of per-cell error magnitude.
+        cmap_name: Matplotlib colormap name for the heatmap.
+        figsize: Figure size in inches as ``(width, height)``.
+        return_figure: If True, return the figure instead of calling ``plt.show()``.
+
+    Returns:
+        The figure if ``return_figure`` is True, otherwise None.
+    """
+    x_edges = np.asarray(heatmap.cell_x_edges, dtype=np.float64).copy()
+    y_edges = np.asarray(heatmap.cell_y_edges, dtype=np.float64).copy()
+    max_angular_error_deg = np.asarray(
+        heatmap.max_angular_error_deg, dtype=np.float64
+    ).copy()
+    error_direction_xy = np.asarray(heatmap.error_direction_xy, dtype=np.float64).copy()
+    interpolation = heatmap.interpolation
+
+    angular_unit_scales = {
+        "deg": (1.0, "degrees"),
+        "mdeg": (1.0e3, "milli degrees"),
+        "udeg": (1.0e6, "micro degrees"),
+        "rad": (np.pi / 180.0, "radians"),
+        "mrad": (np.pi / 180.0 * 1.0e3, "milli radians"),
+        "urad": (np.pi / 180.0 * 1.0e6, "micro radians"),
+    }
+    if angular_unit not in angular_unit_scales:
+        raise ValueError(
+            "angular_unit must be one of "
+            f"{tuple(angular_unit_scales)}, got {angular_unit!r}."
+        )
+    unit_scale, unit_label = angular_unit_scales[angular_unit]
+    max_angular_error = max_angular_error_deg * unit_scale
+
+    if max_angular_error_deg.ndim != 2:
+        raise ValueError(
+            "max_angular_error_deg must have shape (H, W), "
+            f"got {max_angular_error_deg.shape}."
+        )
+    if error_direction_xy.shape != (*max_angular_error_deg.shape, 2):
+        raise ValueError(
+            "error_direction_xy must have shape (H, W, 2), "
+            f"got {error_direction_xy.shape}."
+        )
+    heatmap_height, heatmap_width = max_angular_error_deg.shape
+    valid_x_edge_sizes = {1} if heatmap_width == 1 else {heatmap_width + 1}
+    valid_y_edge_sizes = {1} if heatmap_height == 1 else {heatmap_height + 1}
+    if x_edges.ndim != 1 or x_edges.size not in valid_x_edge_sizes:
+        raise ValueError(
+            f"cell_x_edges must have size {sorted(valid_x_edge_sizes)}, "
+            f"got {x_edges.shape} for heatmap width {heatmap_width}."
+        )
+    if y_edges.ndim != 1 or y_edges.size not in valid_y_edge_sizes:
+        raise ValueError(
+            f"cell_y_edges must have size {sorted(valid_y_edge_sizes)}, "
+            f"got {y_edges.shape} for heatmap height {heatmap_height}."
+        )
+
+    bg = "#111111"
+    fg = "white"
+    accent = "#00d4ff"
+
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+    ax.tick_params(colors=fg)
+    ax.xaxis.label.set_color(fg)
+    ax.yaxis.label.set_color(fg)
+    ax.title.set_color(fg)
+    for spine in ax.spines.values():
+        spine.set_color(fg)
+
+    x_extent_min = float(x_edges[0])
+    x_extent_max = float(x_edges[-1])
+    y_extent_min = float(y_edges[0])
+    y_extent_max = float(y_edges[-1])
+    if x_extent_min == x_extent_max:
+        x_extent_min -= 0.5
+        x_extent_max += 0.5
+    if y_extent_min == y_extent_max:
+        y_extent_min -= 0.5
+        y_extent_max += 0.5
+
+    im = ax.imshow(
+        max_angular_error,
+        cmap=cmap_name,
+        extent=[x_extent_min, x_extent_max, y_extent_max, y_extent_min],  # type: ignore[arg-type]
+        aspect="equal",
+        vmax=vmax,
+    )
+    cbar: Colorbar = fig.colorbar(im, ax=ax, shrink=0.8, fraction=0.035, pad=0.02)
+    cbar.set_label(f"max angular error [{unit_label}]", color=fg)
+    cbar.ax.tick_params(colors=fg)
+
+    if show_directions:
+        if x_edges.size > 1:
+            x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+            x_cell_size = float(np.min(np.abs(np.diff(x_edges))))
+        else:
+            x_centers = x_edges
+            x_cell_size = 1.0
+        if y_edges.size > 1:
+            y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+            y_cell_size = float(np.min(np.abs(np.diff(y_edges))))
+        else:
+            y_centers = y_edges
+            y_cell_size = 1.0
+
+        center_x, center_y = np.meshgrid(x_centers, y_centers, indexing="xy")
+        quiver_stride = max(
+            1,
+            int(np.ceil(max(max_angular_error_deg.shape) / max(int(arrow_grid), 1))),
+        )
+        arrow_spacing = quiver_stride * min(x_cell_size, y_cell_size)
+        max_arrow_length = arrow_scale * arrow_spacing
+        quiver_slice = (
+            slice(None, None, quiver_stride),
+            slice(None, None, quiver_stride),
+        )
+        quiver_mask = max_angular_error_deg[quiver_slice] > 0.0
+
+        if constant_arrow_length:
+            length_factor = np.full(int(np.sum(quiver_mask)), max_arrow_length)
+        else:
+            magnitudes = max_angular_error_deg[quiver_slice][quiver_mask]
+            mag_max = float(np.max(magnitudes)) if magnitudes.size > 0 else 0.0
+            length_factor = (
+                magnitudes * (max_arrow_length / mag_max)
+                if mag_max > 0.0
+                else np.zeros_like(magnitudes)
+            )
+
+        ax.quiver(
+            center_x[quiver_slice][quiver_mask],
+            center_y[quiver_slice][quiver_mask],
+            error_direction_xy[..., 0][quiver_slice][quiver_mask] * length_factor,
+            error_direction_xy[..., 1][quiver_slice][quiver_mask] * length_factor,
+            color=accent,
+            angles="xy",
+            scale_units="xy",
+            scale=1.0,
+            width=0.0022,
+            headwidth=3,
+            headlength=3.5,
+            headaxislength=3,
+        )
+
+    if title is None:
+        title = f"Per-cell max error heatmap ({interpolation})"
+    ax.set_title(f"{title} [{unit_label}]")
+    ax.set_xlabel("x [px]")
+    ax.set_ylabel("y [px]")
+    ax.set_xlim(x_extent_min, x_extent_max)
+    ax.set_ylim(y_extent_max, y_extent_min)
+
+    plt.tight_layout()
     if return_figure:
         return fig
     plt.show()

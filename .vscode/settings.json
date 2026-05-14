@@ -5,8 +5,10 @@
     "--tweaks=-Wall",
     "--tweaks=-Wextra",
     "--clang-tidy",
+    "--query-driver=/usr/bin/c++,/usr/bin/g++,/usr/bin/g++-*,/usr/bin/x86_64-linux-gnu-g++*",
     "-j=5"
   ],
+  "search.useIgnoreFiles": false,
   "files.associations": {
     "*.py": "python",
     "*.rmd": "markdown",

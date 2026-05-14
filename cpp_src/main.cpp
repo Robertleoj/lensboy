@@ -2,7 +2,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <spdlog/spdlog.h>
+#include "./lut_max_cell_error.hpp"
 #include "./python_camera_functions.hpp"
+#include "./seeded_normalize.hpp"
 #include "calibrate.hpp"
 #include "cameramodels.hpp"
 
@@ -237,6 +239,54 @@ PYBIND11_MODULE(
         py::arg("intrinsics"),
         py::arg("pinhole_parameters"),
         py::arg("image_size_wh")
+    );
+
+    m.def(
+        "seeded_normalize_opencv",
+        &lensboy::seeded_normalize_opencv,
+        py::arg("seed_pixels"),
+        py::arg("seed_normals"),
+        py::arg("seed_width"),
+        py::arg("seed_height"),
+        py::arg("query_pixels"),
+        py::arg("intrinsics")
+    );
+
+    m.def(
+        "seeded_normalize_splined",
+        &lensboy::seeded_normalize_splined,
+        py::arg("seed_pixels"),
+        py::arg("seed_normals"),
+        py::arg("seed_width"),
+        py::arg("seed_height"),
+        py::arg("query_pixels"),
+        py::arg("config"),
+        py::arg("intrinsics")
+    );
+
+    m.def(
+        "max_cell_errors_pinhole_splined",
+        &lensboy::max_cell_errors_pinhole_splined,
+        py::arg("config"),
+        py::arg("intrinsics"),
+        py::arg("lut_xy_grid"),
+        py::arg("image_width"),
+        py::arg("image_height"),
+        py::arg("interpolation_mode"),
+        py::arg("max_iterations"),
+        py::arg("gradient_tolerance")
+    );
+
+    m.def(
+        "max_cell_errors_opencv",
+        &lensboy::max_cell_errors_opencv,
+        py::arg("intrinsics"),
+        py::arg("lut_xy_grid"),
+        py::arg("image_width"),
+        py::arg("image_height"),
+        py::arg("interpolation_mode"),
+        py::arg("max_iterations"),
+        py::arg("gradient_tolerance")
     );
 
     m.def(

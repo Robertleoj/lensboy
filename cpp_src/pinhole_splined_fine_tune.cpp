@@ -164,9 +164,9 @@ static inline void BuildProblem(
     std::vector<ObservationRecord>& obs_records,
     double sqrt_lambda
 ) {
-    const int nx = static_cast<int>(cfg.num_knots_x);
-    const int ny = static_cast<int>(cfg.num_knots_y);
-    const int n_knots = nx * ny;
+    const int normalized_x = static_cast<int>(cfg.num_knots_x);
+    const int normalized_y = static_cast<int>(cfg.num_knots_y);
+    const int n_knots = normalized_x * normalized_y;
 
     // pinhole_parameters constant
     problem.AddParameterBlock(const_cast<double*>(pinhole_params), 4);
@@ -278,7 +278,7 @@ static inline void BuildProblem(
 
     // reprojection residuals (wired to correct 16 knots for each observation)
     // Track which cells contain at least one observation.
-    std::vector<bool> cell_has_obs(nx * ny, false);
+    std::vector<bool> cell_has_obs(normalized_x * normalized_y, false);
     obs_records.clear();
     const size_t num_cams = frames.size();
     for (size_t cam_idx = 0; cam_idx < num_cams; cam_idx++) {
@@ -295,7 +295,7 @@ static inline void BuildProblem(
             int ix, iy;
             map.cell_index(cam6.data(), pw, ix, iy);
 
-            cell_has_obs[iy * nx + ix] = true;
+            cell_has_obs[iy * normalized_x + ix] = true;
 
             std::array<int, 16> flat{};
             map.support_indices_4x4(ix, iy, flat);
@@ -338,19 +338,19 @@ static inline void BuildProblem(
     // Third-derivative smoothness priors for cells without observations.
     // For each empty cell (cx, cy), add horizontal and vertical stencils
     // through both rows/columns of the cell's corner knots.
-    for (int cy = 0; cy < ny; cy++) {
-        for (int cx = 0; cx < nx; cx++) {
-            if (cell_has_obs[cy * nx + cx]) {
+    for (int cy = 0; cy < normalized_y; cy++) {
+        for (int cx = 0; cx < normalized_x; cx++) {
+            if (cell_has_obs[cy * normalized_x + cx]) {
                 continue;
             }
 
             // Horizontal: 4-knot stencil along rows cy and cy+1
-            if (cx - 1 >= 0 && cx + 2 < nx) {
-                for (int row = cy; row <= cy + 1 && row < ny; row++) {
-                    const int k0 = row * nx + (cx - 1);
-                    const int k1 = row * nx + cx;
-                    const int k2 = row * nx + (cx + 1);
-                    const int k3 = row * nx + (cx + 2);
+            if (cx - 1 >= 0 && cx + 2 < normalized_x) {
+                for (int row = cy; row <= cy + 1 && row < normalized_y; row++) {
+                    const int k0 = row * normalized_x + (cx - 1);
+                    const int k1 = row * normalized_x + cx;
+                    const int k2 = row * normalized_x + (cx + 1);
+                    const int k3 = row * normalized_x + (cx + 2);
                     problem.AddResidualBlock(
                         new ceres::
                             AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
@@ -377,12 +377,12 @@ static inline void BuildProblem(
             }
 
             // Vertical: 4-knot stencil along columns cx and cx+1
-            if (cy - 1 >= 0 && cy + 2 < ny) {
-                for (int col = cx; col <= cx + 1 && col < nx; col++) {
-                    const int k0 = (cy - 1) * nx + col;
-                    const int k1 = cy * nx + col;
-                    const int k2 = (cy + 1) * nx + col;
-                    const int k3 = (cy + 2) * nx + col;
+            if (cy - 1 >= 0 && cy + 2 < normalized_y) {
+                for (int col = cx; col <= cx + 1 && col < normalized_x; col++) {
+                    const int k0 = (cy - 1) * normalized_x + col;
+                    const int k1 = cy * normalized_x + col;
+                    const int k2 = (cy + 1) * normalized_x + col;
+                    const int k3 = (cy + 2) * normalized_x + col;
                     problem.AddResidualBlock(
                         new ceres::
                             AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
