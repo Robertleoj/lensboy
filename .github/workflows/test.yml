@@ -29,5 +29,8 @@ jobs:
         env:
           VCPKG_ROOT: /home/runner/vcpkg
 
+      - name: Type check
+        run: uv run pyright
+
       - name: Run tests
         run: uv run pytest tests/

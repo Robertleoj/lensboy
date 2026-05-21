@@ -75,7 +75,7 @@ def _mad_sigma_1d(x: np.ndarray) -> float:
     med = np.median(x)
     mad = np.median(np.abs(x - med))
     # 1.4826 = 1 / Phi^{-1}(0.75)  (MAD->sigma for 1D normal)
-    return 1.4826 * mad
+    return float(1.4826 * mad)
 
 
 def _robust_sigma_xy(residuals: list[np.ndarray]) -> float:

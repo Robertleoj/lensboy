@@ -66,7 +66,7 @@ def privatize_images(
         contour = outline_px.astype(np.int32).reshape(-1, 1, 2)
 
         mask = np.zeros(image.shape[:2], dtype=np.uint8)
-        cv2.fillPoly(mask, [contour], 255)
+        cv2.fillPoly(mask, [contour], (255,))
 
         privatized = image.copy()
         privatized[mask == 0] = 0
