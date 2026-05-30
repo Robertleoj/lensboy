@@ -1360,8 +1360,8 @@ def _validate_spline_initial_model_config(
 def calibrate_camera(
     target_points: np.ndarray,
     frames: list[Frame],
-    *,
     camera_model_config: PinholeSplinedConfig,
+    *,
     initial_camera_model: PinholeSplined | None = None,
     estimate_target_warp: bool = True,
     outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
@@ -1372,8 +1372,8 @@ def calibrate_camera(
 def calibrate_camera(
     target_points: np.ndarray,
     frames: list[Frame],
-    *,
     camera_model_config: OpenCVConfig,
+    *,
     initial_camera_model: OpenCV | None = None,
     estimate_target_warp: bool = True,
     outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
@@ -1383,8 +1383,8 @@ def calibrate_camera(
 def calibrate_camera(
     target_points: np.ndarray,
     frames: list[Frame],
-    *,
     camera_model_config: CameraModelConfig,
+    *,
     initial_camera_model: CameraModel | None = None,
     estimate_target_warp: bool = True,
     outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
