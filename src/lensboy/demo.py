@@ -44,7 +44,7 @@ def _fill_triangle(
     local_tri = dst_tri - np.array([x0, y0], dtype=np.float32)
 
     mask = np.zeros((local_h, local_w), dtype=np.uint8)
-    cv2.fillConvexPoly(mask, np.round(local_tri).astype(np.int32), 1)
+    cv2.fillConvexPoly(mask, np.round(local_tri).astype(np.int32), (1,))
 
     yy, xx = np.nonzero(mask)
     if len(xx) == 0:
@@ -109,7 +109,7 @@ def _warp_grid_piecewise_linear(
         map_y,
         interpolation=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
+        borderValue=(0.0,),
     )
 
 

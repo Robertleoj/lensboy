@@ -1404,11 +1404,11 @@ def plot_undistortion(
     grid_mask = np.zeros((H_in, W_in), dtype=np.uint8)
     for x0 in x_lines:
         cv2.line(
-            grid_mask, (int(x0), 0), (int(x0), H_in - 1), 255, thickness=line_thickness
+            grid_mask, (int(x0), 0), (int(x0), H_in - 1), (255,), thickness=line_thickness
         )
     for y0 in y_lines:
         cv2.line(
-            grid_mask, (0, int(y0)), (W_in - 1, int(y0)), 255, thickness=line_thickness
+            grid_mask, (0, int(y0)), (W_in - 1, int(y0)), (255,), thickness=line_thickness
         )
 
     grid_img = gradient_img * (grid_mask[:, :, None] > 0)
