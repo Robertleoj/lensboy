@@ -844,7 +844,7 @@ inline void project_pinhole_splined_n(
 }
 
 py::array_t<double> max_cell_errors_pinhole_splined(
-    PinholeSplinedConfig& config,
+    PinholeSplinedModelDefinition& config,
     PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> lut_xy_grid,
     int image_width,

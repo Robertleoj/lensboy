@@ -160,7 +160,7 @@ static Vec2<double> normalize_single_point(
 }
 
 py::array_t<double> normalize_pinhole_splined_points(
-    PinholeSplinedConfig& config,
+    PinholeSplinedModelDefinition& config,
     PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> pixel_coords
 ) {

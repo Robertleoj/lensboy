@@ -99,7 +99,9 @@ def find_matching_implied_transformation(
     )
 
     optimize_translation = distance is not None
-    d = distance if distance is not None else 1.0
+    d = 1.0
+    if distance is not None:
+        d = distance
 
     # 1. Sample the imager in a disk around the center
     center = np.array([(model_a.image_width - 1) / 2, (model_a.image_height - 1) / 2])
@@ -115,7 +117,10 @@ def find_matching_implied_transformation(
     unit_vectors = rays_b / np.linalg.norm(rays_b, axis=1, keepdims=True)  # (N, 3)
 
     # 4. Find R, t that maximizes sum_i v_i^T normalized(R @ p_i + t)
-    x0 = np.zeros(6 if optimize_translation else 3)
+    x0_size = 3
+    if optimize_translation:
+        x0_size = 6
+    x0 = np.zeros(x0_size)
     result = minimize(
         _objective,
         x0,
@@ -124,7 +129,9 @@ def find_matching_implied_transformation(
     )
 
     R = Rotation.from_rotvec(result.x[:3]).as_matrix()
-    t = result.x[3:6] if optimize_translation else np.zeros(3)
+    t = np.zeros(3)
+    if optimize_translation:
+        t = result.x[3:6]
     return Pose.from_rotmat_trans(rotmat=R, trans=t)
 
 
@@ -160,7 +167,9 @@ def compute_projection_diff(
         model_a, model_b, distance=distance, radius=radius
     )
 
-    d = distance if distance is not None else 1.0
+    d = 1.0
+    if distance is not None:
+        d = distance
 
     w, h = model_a.image_width, model_a.image_height
     aspect = w / h

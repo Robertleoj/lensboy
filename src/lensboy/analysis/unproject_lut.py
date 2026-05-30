@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
+from lensboy import lensboy_bindings as lbb
 from lensboy.camera_models.unproject_lut import UnprojectLUT
 
 if TYPE_CHECKING:
@@ -307,7 +308,6 @@ def _max_cell_errors_call(
         error_delta_x, error_delta_y]``. Cells are row-major over
         ``(cell_y, cell_x)``.
     """
-    from lensboy import lensboy_bindings as lbb
     from lensboy.camera_models.opencv import OpenCV
     from lensboy.camera_models.pinhole_splined import PinholeSplined
 
@@ -328,7 +328,7 @@ def _max_cell_errors_call(
     }
     if isinstance(model, PinholeSplined):
         return lbb.max_cell_errors_pinhole_splined(
-            config=model._cpp_config(),
+            config=model._cpp_model_definition(),
             intrinsics=model._cpp_params(),
             **common_kwargs,
         )

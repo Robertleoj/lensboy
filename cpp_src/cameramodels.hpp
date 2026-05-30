@@ -12,13 +12,16 @@
 namespace py = pybind11;
 namespace lensboy {
 
-struct PinholeSplinedConfig {
+struct PinholeSplinedModelDefinition {
     uint32_t image_width;
     uint32_t image_height;
     double fov_deg_x;
     double fov_deg_y;
     uint32_t num_knots_x;
     uint32_t num_knots_y;
+};
+
+struct PinholeSplinedOptimizationConfig : PinholeSplinedModelDefinition {
     double smoothness_lambda;
 };
 
@@ -313,7 +316,7 @@ struct SplineMap {
     double y_scale = 0.0;
 
     explicit SplineMap(
-        const PinholeSplinedConfig& cfg
+        const PinholeSplinedModelDefinition& cfg
     ) {
         this->Nx = static_cast<int>(cfg.num_knots_x);
         this->Ny = static_cast<int>(cfg.num_knots_y);
@@ -406,7 +409,7 @@ struct SplineMap {
 
 template <typename T>
 void project_pinhole_splined(
-    PinholeSplinedConfig* config,
+    PinholeSplinedModelDefinition* config,
     const T* const pinhole_parameters,  // fx, fy, cx, cy
     const T* const dx_grid,
     const T* const dy_grid,

@@ -141,7 +141,7 @@ struct DistortionError {
 
 py::dict get_matching_spline_distortion_model(
     std::vector<double>& opencv_distortion_params,
-    PinholeSplinedConfig& model_config,
+    PinholeSplinedOptimizationConfig& model_config,
     double image_bound_x,
     double image_bound_y
 ) {

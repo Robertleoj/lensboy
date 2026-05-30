@@ -23,7 +23,7 @@ py::array_t<double> seeded_normalize_splined(
     int seed_width,
     int seed_height,
     py::array_t<double, py::array::c_style | py::array::forcecast> query_pixels,
-    PinholeSplinedConfig& config,
+    PinholeSplinedModelDefinition& config,
     PinholeSplinedIntrinsicsParameters& params
 );
 

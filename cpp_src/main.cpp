@@ -23,16 +23,83 @@ PYBIND11_MODULE(
 ) {
     m.doc() = "lensboy for camera calibration";
     spdlog::flush_on(spdlog::level::trace);
-    py::class_<lensboy::PinholeSplinedConfig>(m, "PinholeSplinedConfig")
+    py::class_<lensboy::PinholeSplinedModelDefinition>(
+        m,
+        "PinholeSplinedModelDefinition"
+    )
         .def(
-            py::init<
-                uint32_t,
-                uint32_t,
-                double,
-                double,
-                uint32_t,
-                uint32_t,
-                double>(),
+            py::init<uint32_t, uint32_t, double, double, uint32_t, uint32_t>(),
+            py::arg("image_width"),
+            py::arg("image_height"),
+            py::arg("fov_deg_x"),
+            py::arg("fov_deg_y"),
+            py::arg("num_knots_x"),
+            py::arg("num_knots_y")
+        )
+        .def_readwrite(
+            "image_width",
+            &lensboy::PinholeSplinedModelDefinition::image_width
+        )
+        .def_readwrite(
+            "image_height",
+            &lensboy::PinholeSplinedModelDefinition::image_height
+        )
+        .def_readwrite(
+            "fov_deg_x",
+            &lensboy::PinholeSplinedModelDefinition::fov_deg_x
+        )
+        .def_readwrite(
+            "fov_deg_y",
+            &lensboy::PinholeSplinedModelDefinition::fov_deg_y
+        )
+
+        .def_readwrite(
+            "num_knots_x",
+            &lensboy::PinholeSplinedModelDefinition::num_knots_x
+        )
+        .def_readwrite(
+            "num_knots_y",
+            &lensboy::PinholeSplinedModelDefinition::num_knots_y
+        )
+        .def(
+            "__repr__",
+            [](const lensboy::PinholeSplinedModelDefinition& self) {
+                std::ostringstream oss;
+                oss << "PinholeSplinedModelDefinition("
+                    << "image_width=" << self.image_width
+                    << ", image_height=" << self.image_height
+                    << ", fov_deg_x=" << self.fov_deg_x
+                    << ", fov_deg_y=" << self.fov_deg_y
+                    << ", num_knots_x=" << self.num_knots_x
+                    << ", num_knots_y=" << self.num_knots_y << ")";
+                return oss.str();
+            }
+        );
+
+    py::class_<
+        lensboy::PinholeSplinedOptimizationConfig,
+        lensboy::PinholeSplinedModelDefinition>(
+        m,
+        "PinholeSplinedOptimizationConfig"
+    )
+        .def(
+            py::init([](uint32_t image_width,
+                        uint32_t image_height,
+                        double fov_deg_x,
+                        double fov_deg_y,
+                        uint32_t num_knots_x,
+                        uint32_t num_knots_y,
+                        double smoothness_lambda) {
+                lensboy::PinholeSplinedOptimizationConfig config;
+                config.image_width = image_width;
+                config.image_height = image_height;
+                config.fov_deg_x = fov_deg_x;
+                config.fov_deg_y = fov_deg_y;
+                config.num_knots_x = num_knots_x;
+                config.num_knots_y = num_knots_y;
+                config.smoothness_lambda = smoothness_lambda;
+                return config;
+            }),
             py::arg("image_width"),
             py::arg("image_height"),
             py::arg("fov_deg_x"),
@@ -42,40 +109,24 @@ PYBIND11_MODULE(
             py::arg("smoothness_lambda")
         )
         .def_readwrite(
-            "image_width",
-            &lensboy::PinholeSplinedConfig::image_width
-        )
-        .def_readwrite(
-            "image_height",
-            &lensboy::PinholeSplinedConfig::image_height
-        )
-        .def_readwrite("fov_deg_x", &lensboy::PinholeSplinedConfig::fov_deg_x)
-        .def_readwrite("fov_deg_y", &lensboy::PinholeSplinedConfig::fov_deg_y)
-
-        .def_readwrite(
-            "num_knots_x",
-            &lensboy::PinholeSplinedConfig::num_knots_x
-        )
-        .def_readwrite(
-            "num_knots_y",
-            &lensboy::PinholeSplinedConfig::num_knots_y
-        )
-        .def_readwrite(
             "smoothness_lambda",
-            &lensboy::PinholeSplinedConfig::smoothness_lambda
+            &lensboy::PinholeSplinedOptimizationConfig::smoothness_lambda
         )
-        .def("__repr__", [](const lensboy::PinholeSplinedConfig& self) {
-            std::ostringstream oss;
-            oss << "PinholeSplinedConfig("
-                << "image_width=" << self.image_width
-                << ", image_height=" << self.image_height
-                << ", fov_deg_x=" << self.fov_deg_x
-                << ", fov_deg_y=" << self.fov_deg_y
-                << ", num_knots_x=" << self.num_knots_x
-                << ", num_knots_y=" << self.num_knots_y
-                << ", smoothness_lambda=" << self.smoothness_lambda << ")";
-            return oss.str();
-        });
+        .def(
+            "__repr__",
+            [](const lensboy::PinholeSplinedOptimizationConfig& self) {
+                std::ostringstream oss;
+                oss << "PinholeSplinedOptimizationConfig("
+                    << "image_width=" << self.image_width
+                    << ", image_height=" << self.image_height
+                    << ", fov_deg_x=" << self.fov_deg_x
+                    << ", fov_deg_y=" << self.fov_deg_y
+                    << ", num_knots_x=" << self.num_knots_x
+                    << ", num_knots_y=" << self.num_knots_y
+                    << ", smoothness_lambda=" << self.smoothness_lambda << ")";
+                return oss.str();
+            }
+        );
 
     py::class_<lensboy::PinholeSplinedIntrinsicsParameters>(
         m,

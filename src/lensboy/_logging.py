@@ -47,7 +47,11 @@ def _set_cpp_log_level(level: str) -> None:
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
-    return lo if v < lo else hi if v > hi else v
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
 
 
 def _fmt_int(n: int) -> str:
@@ -117,7 +121,9 @@ class Progress:
             return
         if n < 0:
             raise ValueError("n must be >= 0")
-        self.n = n if self.total <= 0 else min(n, self.total)
+        self.n = n
+        if self.total > 0:
+            self.n = min(n, self.total)
         self.draw(force=True)
 
     def draw(self, *, force: bool = False) -> None:

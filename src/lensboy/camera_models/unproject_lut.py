@@ -96,7 +96,9 @@ def _compute_seed_grid(
     # Seed grid: ~1 seed per 4 image pixels along the long axis
     w = camera_model.image_width
     h = camera_model.image_height
-    aspect = half_x / half_y if half_y > 0 else 1.0
+    aspect = 1.0
+    if half_y > 0:
+        aspect = half_x / half_y
     seed_long = max(w, h) // 4
     if aspect >= 1.0:
         seed_width = seed_long
@@ -187,7 +189,7 @@ def _seeded_normalize(
         seed_width,
         seed_height,
         query_pixels,
-        camera_model._cpp_config(),
+        camera_model._cpp_model_definition(),
         camera_model._cpp_params(),
     )
 

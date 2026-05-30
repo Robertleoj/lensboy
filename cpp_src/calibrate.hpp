@@ -25,13 +25,13 @@ py::dict calibrate_opencv(
 
 py::dict get_matching_spline_distortion_model(
     std::vector<double>& opencv_distortion_params,
-    PinholeSplinedConfig& model_config,
+    PinholeSplinedOptimizationConfig& model_config,
     double image_bound_x,
     double image_bound_y
 );
 
 py::dict fine_tune_pinhole_splined(
-    PinholeSplinedConfig& model_config,
+    PinholeSplinedOptimizationConfig& model_config,
     PinholeSplinedIntrinsicsParameters& intrinsics_parameters,
     std::vector<Vec6<double>>& cameras_from_target,
     std::vector<Vec3<double>>& target_points,
@@ -42,7 +42,7 @@ py::dict fine_tune_pinhole_splined(
 );
 
 py::array_t<double> normalize_pinhole_splined_points(
-    PinholeSplinedConfig& config,
+    PinholeSplinedModelDefinition& config,
     PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> pixel_coords
 );

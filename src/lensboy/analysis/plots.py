@@ -403,8 +403,12 @@ def plot_distortion_grid(
         x_half = fov_x_half * fov_fraction
         y_half = fov_y_half * fov_fraction
     elif ux_max is not None or uy_max is not None:
-        x_half = ux_max if ux_max is not None else fov_x_half
-        y_half = uy_max if uy_max is not None else fov_y_half
+        x_half = fov_x_half
+        if ux_max is not None:
+            x_half = ux_max
+        y_half = fov_y_half
+        if uy_max is not None:
+            y_half = uy_max
     else:
         x_half = fov_x_half
         y_half = fov_y_half
@@ -706,8 +710,12 @@ def _plot_residuals(
         inlier_2d.append(fi.residuals[fi.inlier_mask])
         outlier_2d.append(fi.residuals[~fi.inlier_mask])
 
-    inlier_pts = np.concatenate(inlier_2d) if len(inlier_2d) > 0 else np.empty((0, 2))
-    outlier_pts = np.concatenate(outlier_2d) if len(outlier_2d) > 0 else np.empty((0, 2))
+    inlier_pts = np.empty((0, 2))
+    if len(inlier_2d) > 0:
+        inlier_pts = np.concatenate(inlier_2d)
+    outlier_pts = np.empty((0, 2))
+    if len(outlier_2d) > 0:
+        outlier_pts = np.concatenate(outlier_2d)
     all_pts = np.concatenate([inlier_pts, outlier_pts])  # (N, 2)
 
     if all_pts.shape[0] == 0:
@@ -720,7 +728,9 @@ def _plot_residuals(
     mad = float(np.median(np.abs(inlier_vals - mu_1d)))
     sigma_1d = 1.4826 * mad
 
-    half = axis_range if axis_range is not None else n_sigma * sigma_1d
+    half = n_sigma * sigma_1d
+    if axis_range is not None:
+        half = axis_range
     lo = mu_1d - half
     hi = mu_1d + half
     bin_edges = np.linspace(lo, hi, bins + 1)
@@ -794,7 +804,9 @@ def _plot_residuals(
 
     # --- Bottom-left: 2D scatter + Gaussian contours ---
     sigma_max = max(sigma_x, sigma_y)
-    grid_half = axis_range if axis_range is not None else n_sigma * sigma_max
+    grid_half = n_sigma * sigma_max
+    if axis_range is not None:
+        grid_half = axis_range
     gx = np.linspace(mu_2d[0] - grid_half, mu_2d[0] + grid_half, 400)
     gy = np.linspace(mu_2d[1] - grid_half, mu_2d[1] + grid_half, 400)
     GX, GY = np.meshgrid(gx, gy)
@@ -825,7 +837,9 @@ def _plot_residuals(
             edgecolors="none",
         )
 
-    lim = axis_range if axis_range is not None else n_sigma * sigma_max
+    lim = n_sigma * sigma_max
+    if axis_range is not None:
+        lim = axis_range
     ax_2d.set_xlim(mu_2d[0] - lim, mu_2d[0] + lim)
     ax_2d.set_ylim(mu_2d[1] - lim, mu_2d[1] + lim)
     ax_2d.set_aspect("equal", adjustable="box")
@@ -909,8 +923,12 @@ def _plot_residual_vectors(
         positions.append(frame.detected_points_in_image)
         residuals.append(fi.residuals)
 
-    pos = np.concatenate(positions) if len(positions) > 0 else np.empty((0, 2))
-    res = np.concatenate(residuals) if len(residuals) > 0 else np.empty((0, 2))
+    pos = np.empty((0, 2))
+    if len(positions) > 0:
+        pos = np.concatenate(positions)
+    res = np.empty((0, 2))
+    if len(residuals) > 0:
+        res = np.concatenate(residuals)
 
     if pos.shape[0] == 0:
         return
@@ -1025,8 +1043,12 @@ def _plot_residual_grid(
         positions.append(frame.detected_points_in_image[fi.inlier_mask])
         residuals.append(fi.residuals[fi.inlier_mask])
 
-    pos = np.concatenate(positions) if len(positions) > 0 else np.empty((0, 2))
-    res = np.concatenate(residuals) if len(residuals) > 0 else np.empty((0, 2))
+    pos = np.empty((0, 2))
+    if len(positions) > 0:
+        pos = np.concatenate(positions)
+    res = np.empty((0, 2))
+    if len(residuals) > 0:
+        res = np.concatenate(residuals)
 
     if pos.shape[0] == 0:
         return
@@ -1471,7 +1493,9 @@ def plot_undistortion(
         colors = cmap(diag)
         return segs, colors
 
-    n_rows = 3 if image is not None else 2
+    n_rows = 2
+    if image is not None:
+        n_rows = 3
     panel_w = 10
     panel_h = panel_w * (H_in / W_in)
     fig, axes = plt.subplots(
@@ -1691,7 +1715,9 @@ def _draw_frame_residuals(
     mags = np.linalg.norm(res, axis=1)
 
     inlier_mags = mags[mask]
-    vmax = float(np.max(inlier_mags)) if len(inlier_mags) > 0 else 1.0
+    vmax = 1.0
+    if len(inlier_mags) > 0:
+        vmax = float(np.max(inlier_mags))
     norm = mcolors.Normalize(vmin=0, vmax=vmax)
 
     ax.set_facecolor(bg)
@@ -1794,7 +1820,9 @@ def _plot_worst_residual_frames(
         mags = np.linalg.norm(fi.residuals, axis=1)
         if not include_outliers:
             mags = mags[fi.inlier_mask]
-        per_frame_mags[i] = float(np.sqrt(np.mean(mags**2))) if len(mags) > 0 else 0.0
+        per_frame_mags[i] = 0.0
+        if len(mags) > 0:
+            per_frame_mags[i] = float(np.sqrt(np.mean(mags**2)))
 
     ranked = sorted(per_frame_mags, key=lambda i: per_frame_mags[i], reverse=True)
     selected = ranked[:n]
@@ -1824,8 +1852,11 @@ def _plot_worst_residual_frames(
         mags = np.linalg.norm(fi.residuals, axis=1)
         if not include_outliers:
             mags = mags[fi.inlier_mask]
-        worst = float(np.max(mags)) if len(mags) > 0 else 0.0
-        mean = float(np.mean(mags)) if len(mags) > 0 else 0.0
+        worst = 0.0
+        mean = 0.0
+        if len(mags) > 0:
+            worst = float(np.max(mags))
+            mean = float(np.mean(mags))
         subtitle = f"Frame {idx}  (max={worst:.2f} px, mean={mean:.2f} px)"
 
         _draw_frame_residuals(
@@ -1904,7 +1935,9 @@ def plot_projection_diff(
     w = model_a.image_width
     h = model_a.image_height
 
-    fit_radius: float = radius if radius is not None else min(w, h) * 0.4
+    fit_radius: float = min(w, h) * 0.4
+    if radius is not None:
+        fit_radius = radius
 
     pixels_a, _, diff, (ny_dense, nx_dense), pose = compute_projection_diff(
         model_a, model_b, radius=fit_radius, distance=distance
@@ -1925,7 +1958,9 @@ def plot_projection_diff(
 
     panel_w = 10
     aspect = h / w
-    nrows = 2 if show_grid else 1
+    nrows = 1
+    if show_grid:
+        nrows = 2
     fig, axes = plt.subplots(
         nrows, 1, figsize=(panel_w, nrows * panel_w * aspect), constrained_layout=True
     )
@@ -1936,7 +1971,9 @@ def plot_projection_diff(
         ax_heat, ax_grid = axes
 
     fig.patch.set_facecolor(bg)
-    all_axes = [ax_heat] if ax_grid is None else [ax_heat, ax_grid]
+    all_axes = [ax_heat]
+    if ax_grid is not None:
+        all_axes = [ax_heat, ax_grid]
     for ax in all_axes:
         ax.set_facecolor(bg)
         ax.tick_params(colors=fg)
@@ -1993,7 +2030,9 @@ def plot_projection_diff(
     ax_heat.set_aspect("equal", adjustable="box")
     ax_heat.set_xlabel("x [px]")
     ax_heat.set_ylabel("y [px]")
-    dist_str = "at infinity" if distance is None else f"at distance {distance}"
+    dist_str = f"at distance {distance}"
+    if distance is None:
+        dist_str = "at infinity"
     ax_heat.set_title(f"Projection difference {dist_str}")
 
     # --- Bottom panel: exaggerated deformation grid ---
@@ -2017,7 +2056,9 @@ def plot_projection_diff(
         if diff_scale is None:
             # Use only points within heatmap_max
             visible = grid_diff_norms[grid_diff_norms <= heatmap_max]
-            median_visible = float(np.median(visible)) if len(visible) > 0 else 1.0
+            median_visible = 1.0
+            if len(visible) > 0:
+                median_visible = float(np.median(visible))
             target_displacement = min(w, h) / 40
             raw_scale = target_displacement / median_visible
             # Round to 1-2 significant digits
@@ -2229,8 +2270,12 @@ def _plot_unproject_lut_error_heatmap(
             f"got {error_direction_xy.shape}."
         )
     heatmap_height, heatmap_width = max_angular_error_deg.shape
-    valid_x_edge_sizes = {1} if heatmap_width == 1 else {heatmap_width + 1}
-    valid_y_edge_sizes = {1} if heatmap_height == 1 else {heatmap_height + 1}
+    valid_x_edge_sizes = {heatmap_width + 1}
+    if heatmap_width == 1:
+        valid_x_edge_sizes = {1}
+    valid_y_edge_sizes = {heatmap_height + 1}
+    if heatmap_height == 1:
+        valid_y_edge_sizes = {1}
     if x_edges.ndim != 1 or x_edges.size not in valid_x_edge_sizes:
         raise ValueError(
             f"cell_x_edges must have size {sorted(valid_x_edge_sizes)}, "
@@ -2309,12 +2354,12 @@ def _plot_unproject_lut_error_heatmap(
             length_factor = np.full(int(np.sum(quiver_mask)), max_arrow_length)
         else:
             magnitudes = max_angular_error_deg[quiver_slice][quiver_mask]
-            mag_max = float(np.max(magnitudes)) if magnitudes.size > 0 else 0.0
-            length_factor = (
-                magnitudes * (max_arrow_length / mag_max)
-                if mag_max > 0.0
-                else np.zeros_like(magnitudes)
-            )
+            mag_max = 0.0
+            if magnitudes.size > 0:
+                mag_max = float(np.max(magnitudes))
+            length_factor = np.zeros_like(magnitudes)
+            if mag_max > 0.0:
+                length_factor = magnitudes * (max_arrow_length / mag_max)
 
         ax.quiver(
             center_x[quiver_slice][quiver_mask],
@@ -2385,13 +2430,15 @@ def _plot_per_image_rms(
             continue
         valid_indices.append(i)
         norms = np.linalg.norm(fi.residuals, axis=1)
-        total_rms_list.append(
-            float(np.sqrt(np.mean(norms**2))) if len(norms) > 0 else 0.0
-        )
+        total_rms = 0.0
+        if len(norms) > 0:
+            total_rms = float(np.sqrt(np.mean(norms**2)))
+        total_rms_list.append(total_rms)
         inlier_norms = norms[fi.inlier_mask]
-        inlier_rms_list.append(
-            float(np.sqrt(np.mean(inlier_norms**2))) if len(inlier_norms) > 0 else 0.0
-        )
+        inlier_rms = 0.0
+        if len(inlier_norms) > 0:
+            inlier_rms = float(np.sqrt(np.mean(inlier_norms**2)))
+        inlier_rms_list.append(inlier_rms)
 
     n_valid = len(valid_indices)
     inlier_rms = np.array(inlier_rms_list)
