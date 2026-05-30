@@ -87,8 +87,6 @@ class PinholeSplined(CameraModel):
     fov_deg_x: float
     fov_deg_y: float
 
-    smoothness_lambda: float = 1.0
-
     def __repr__(self) -> str:
         return (
             f"PinholeSplined({self.image_width}x{self.image_height}, "
@@ -187,15 +185,14 @@ class PinholeSplined(CameraModel):
     def _camera_model_name() -> str:
         return "pinhole_splined"
 
-    def _cpp_config(self) -> lbb.PinholeSplinedConfig:
-        return lbb.PinholeSplinedConfig(
+    def _cpp_model_definition(self) -> lbb.PinholeSplinedModelDefinition:
+        return lbb.PinholeSplinedModelDefinition(
             self.image_width,
             self.image_height,
             self.fov_deg_x,
             self.fov_deg_y,
             self.num_knots_x,
             self.num_knots_y,
-            self.smoothness_lambda,
         )
 
     def _cpp_params(self) -> lbb.PinholeSplinedIntrinsicsParameters:
@@ -221,7 +218,7 @@ class PinholeSplined(CameraModel):
             f"Expected (N, 2) array, got {pts.shape}"
         )
         return lbb.normalize_pinhole_splined_points(
-            self._cpp_config(),
+            self._cpp_model_definition(),
             self._cpp_params(),
             pixel_coords=pts,
         )
@@ -269,7 +266,7 @@ class PinholeSplined(CameraModel):
             f"Expected floating dtype, got {points_in_cam.dtype}"
         )
         return lbb.project_pinhole_splined_points(
-            self._cpp_config(),
+            self._cpp_model_definition(),
             self._cpp_params(),
             points_in_camera=points_in_cam,
         )
@@ -302,8 +299,12 @@ class PinholeSplined(CameraModel):
         Returns:
             Undistorted pinhole model with precomputed remap tables.
         """
-        fov_x = target_fov_deg_x if target_fov_deg_x is not None else self.fov_deg_x
-        fov_y = target_fov_deg_y if target_fov_deg_y is not None else self.fov_deg_y
+        fov_x = self.fov_deg_x
+        if target_fov_deg_x is not None:
+            fov_x = target_fov_deg_x
+        fov_y = self.fov_deg_y
+        if target_fov_deg_y is not None:
+            fov_y = target_fov_deg_y
 
         if image_size_wh is None:
             image_size_wh = (self.image_width, self.image_height)
@@ -344,10 +345,14 @@ class PinholeSplined(CameraModel):
         Returns:
             Undistorted pinhole model with precomputed remap tables.
         """
-        fx = fx if fx is not None else self.fx
-        fy = fy if fy is not None else self.fy
-        cx = cx if cx is not None else self.cx
-        cy = cy if cy is not None else self.cy
+        if fx is None:
+            fx = self.fx
+        if fy is None:
+            fy = self.fy
+        if cx is None:
+            cx = self.cx
+        if cy is None:
+            cy = self.cy
 
         if image_size_wh is None:
             image_size_wh = (self.image_width, self.image_height)
@@ -355,7 +360,7 @@ class PinholeSplined(CameraModel):
         pinhole_parameters = (fx, fy, cx, cy)
 
         map_x, map_y = lbb.make_undistortion_maps_pinhole_splined(
-            self._cpp_config(),
+            self._cpp_model_definition(),
             self._cpp_params(),
             np.array(pinhole_parameters, dtype=float),
             image_size_wh,

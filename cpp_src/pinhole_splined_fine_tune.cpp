@@ -148,7 +148,7 @@ static bool any_cell_changed(
 
 static inline void BuildProblem(
     ceres::Problem& problem,
-    const PinholeSplinedConfig& cfg,
+    const PinholeSplinedOptimizationConfig& cfg,
     const SplineMap& map,
     const double* pinhole_params,
     double* dxp,
@@ -412,7 +412,7 @@ static inline void BuildProblem(
 }
 
 py::dict fine_tune_pinhole_splined(
-    lensboy::PinholeSplinedConfig& model_config,
+    lensboy::PinholeSplinedOptimizationConfig& model_config,
     lensboy::PinholeSplinedIntrinsicsParameters& intrinsics_parameters,
     std::vector<Vec6<double>>& cameras_from_target,
     std::vector<Vec3<double>>& target_points,

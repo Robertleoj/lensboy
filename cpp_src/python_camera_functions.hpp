@@ -8,7 +8,7 @@
 namespace lensboy {
 
 static py::array_t<double> project_pinhole_splined_pywrapper(
-    lensboy::PinholeSplinedConfig& model_config,
+    lensboy::PinholeSplinedModelDefinition& model_config,
     lensboy::PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast>
         points_in_camera
@@ -71,7 +71,7 @@ static py::array_t<double> project_pinhole_splined_pywrapper(
 }
 
 static py::tuple make_undistortion_maps_pinhole_splined(
-    lensboy::PinholeSplinedConfig& model_config,
+    lensboy::PinholeSplinedModelDefinition& model_config,
     lensboy::PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast>
         pinhole_parameters,

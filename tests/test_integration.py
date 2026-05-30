@@ -1,6 +1,7 @@
 """Integration tests using a real charuco dataset and synthetic data."""
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -77,6 +78,59 @@ def test_opencv_full14_explicit_focal_length() -> None:
     assert outlier_pct < 1.2, f"Too many outliers: {outlier_pct:.1f}%"
 
 
+def test_opencv_calibrates_from_initial_model() -> None:
+    """Calibrate an OpenCV model starting from a previous calibrated model."""
+    target_points, frames, img_h, img_w = load_test_dataset()
+
+    config = lb.OpenCVConfig(
+        image_height=img_h,
+        image_width=img_w,
+        included_distortion_coefficients=lb.OpenCVConfig.FULL_14,
+    )
+    baseline = lb.calibrate_camera(target_points, frames, camera_model_config=config)
+    initial_model = replace(
+        baseline.camera_model,
+        fx=baseline.camera_model.fx * 1.05,
+        fy=baseline.camera_model.fy * 0.95,
+        cx=baseline.camera_model.cx + 8.0,
+        cy=baseline.camera_model.cy - 6.0,
+        distortion_coeffs=baseline.camera_model.distortion_coeffs
+        + np.array(
+            [
+                0.02,
+                -0.01,
+                0.001,
+                -0.001,
+                0.005,
+                -0.002,
+                0.001,
+                -0.001,
+                0.0005,
+                -0.0005,
+                0.0005,
+                -0.0005,
+                0.0002,
+                -0.0002,
+            ],
+            dtype=np.float64,
+        ),
+    )
+    result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=config,
+        initial_camera_model=initial_model,
+    )
+
+    sigma = result.residual_sigma_map()
+    baseline_sigma = baseline.residual_sigma_map()
+    outlier_pct = (result.num_outliers() / result.num_detections()) * 100
+
+    assert sigma < 0.11, f"Residual sigma too high: {sigma:.3f}px"
+    assert sigma <= baseline_sigma + 0.01
+    assert outlier_pct < 1.2, f"Too many outliers: {outlier_pct:.1f}%"
+
+
 def test_spline_30x20() -> None:
     """Calibrate a 30x20 spline model."""
     target_points, frames, img_h, img_w = load_test_dataset()
@@ -96,6 +150,50 @@ def test_spline_30x20() -> None:
     assert outlier_pct < 1.6, f"Too many outliers: {outlier_pct:.1f}%"
 
     _check_frame_projections(result, target_points, frames)
+
+
+def test_spline_calibrates_from_initial_model() -> None:
+    """Calibrate a spline model starting from a previous calibrated model."""
+    target_points, frames, img_h, img_w = load_test_dataset()
+
+    config = lb.PinholeSplinedConfig(
+        img_h,
+        img_w,
+        num_knots_x=30,
+        num_knots_y=20,
+    )
+    baseline = lb.calibrate_camera(target_points, frames, camera_model_config=config)
+    initial_model = replace(
+        baseline.camera_model,
+        dx_grid=baseline.camera_model.dx_grid
+        + np.linspace(
+            -0.001,
+            0.001,
+            baseline.camera_model.dx_grid.size,
+            dtype=np.float64,
+        ).reshape(baseline.camera_model.dx_grid.shape),
+        dy_grid=baseline.camera_model.dy_grid
+        + np.linspace(
+            0.001,
+            -0.001,
+            baseline.camera_model.dy_grid.size,
+            dtype=np.float64,
+        ).reshape(baseline.camera_model.dy_grid.shape),
+    )
+    result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=config,
+        initial_camera_model=initial_model,
+    )
+
+    sigma = result.residual_sigma_map()
+    baseline_sigma = baseline.residual_sigma_map()
+    outlier_pct = result.num_outliers() / result.num_detections() * 100
+
+    assert sigma < 0.09, f"Residual sigma too high: {sigma:.3f}px"
+    assert sigma <= baseline_sigma + 0.01
+    assert outlier_pct < 1.6, f"Too many outliers: {outlier_pct:.1f}%"
 
 
 def test_opencv_all_outliers_in_one_frame() -> None:
@@ -164,6 +262,67 @@ def test_opencv_distortion_mask() -> None:
         assert np.all(coeffs[disabled] == 0), (
             f"{name}: expected zeros at disabled indices {np.where(disabled)[0]}, "
             f"got {coeffs[disabled]}"
+        )
+
+
+def test_initial_opencv_model_must_match_config() -> None:
+    """Reject an initial OpenCV model with parameters outside the config."""
+    target_points = np.zeros((4, 3), dtype=float)
+    config = lb.OpenCVConfig(
+        image_height=480,
+        image_width=640,
+        included_distortion_coefficients=lb.OpenCVConfig.NONE,
+    )
+    initial_model = lb.OpenCV(
+        image_height=480,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        distortion_coeffs=np.array([0.1]),
+    )
+
+    with pytest.raises(ValueError, match="disabled by the config"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=config,
+            initial_camera_model=initial_model,
+        )
+
+
+def test_initial_spline_model_must_match_config() -> None:
+    """Reject an initial spline model that the config could not produce."""
+    target_points = np.zeros((4, 3), dtype=float)
+    config = lb.PinholeSplinedConfig(
+        image_height=480,
+        image_width=640,
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_xy=(90.0, 70.0),
+    )
+    initial_model = lb.PinholeSplined(
+        image_height=480,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        dx_grid=np.zeros((8, 12), dtype=float),
+        dy_grid=np.zeros((8, 12), dtype=float),
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_x=91.0,
+        fov_deg_y=70.0,
+    )
+
+    with pytest.raises(ValueError, match="fov_deg_x"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=config,
+            initial_camera_model=initial_model,
         )
 
 

@@ -18,7 +18,7 @@ from lensboy.calibration.type_defs import (
     TargetWarp,
     WarpCoordinates,
 )
-from lensboy.camera_models.base_model import CameraModelConfig
+from lensboy.camera_models.base_model import CameraModel, CameraModelConfig
 from lensboy.camera_models.opencv import OpenCV, OpenCVConfig
 from lensboy.camera_models.pinhole_splined import (
     PinholeSplined,
@@ -75,7 +75,7 @@ def _mad_sigma_1d(x: np.ndarray) -> float:
     med = np.median(x)
     mad = np.median(np.abs(x - med))
     # 1.4826 = 1 / Phi^{-1}(0.75)  (MAD->sigma for 1D normal)
-    return 1.4826 * mad
+    return float(1.4826 * mad)
 
 
 def _robust_sigma_xy(residuals: list[np.ndarray]) -> float:
@@ -126,6 +126,12 @@ def _opencv_calibrate_inner(
     params = batch.intrinsics._params()
     mask = config.optimize_mask()
     intrinsics_param_optimize_mask = mask.tolist()
+    warp_coordinates_cpp = None
+    if warp_coordinates is not None:
+        warp_coordinates_cpp = warp_coordinates._to_cpp()
+    warp_coeffs_initial = [0.0] * 5
+    if batch.warp_coeffs is not None:
+        warp_coeffs_initial = list(batch.warp_coeffs)
 
     result = lbb.calibrate_opencv(
         intrinsics_initial_value=params,
@@ -133,12 +139,8 @@ def _opencv_calibrate_inner(
         cameras_from_target=[p._to_cpp() for p in batch.cameras_from_target],
         target_points=list(target_points),
         frames=[f._to_cpp() for f in batch.frames],
-        warp_coordinates=(
-            warp_coordinates._to_cpp() if warp_coordinates is not None else None
-        ),
-        warp_coeffs_initial=(
-            list(batch.warp_coeffs) if batch.warp_coeffs is not None else [0.0] * 5
-        ),
+        warp_coordinates=warp_coordinates_cpp,
+        warp_coeffs_initial=warp_coeffs_initial,
     )
 
     out_coeffs: tuple[float, float, float, float, float] | None = None
@@ -377,29 +379,113 @@ def _solve_pnp_all_frames(
         poses.append(identity)
         solved.append(False)
 
-    mean_error = total_squared_error / total_points if total_points > 0 else float("inf")
+    mean_error = float("inf")
+    if total_points > 0:
+        mean_error = total_squared_error / total_points
     return poses, solved, mean_error
+
+
+def _solve_pnp_all_frames_with_model(
+    model: OpenCV | PinholeSplined,
+    target_points: np.ndarray,
+    frames: list[Frame],
+) -> tuple[list[Pose], list[bool], float]:
+    """Estimate camera-from-target transforms with normalized detections.
+
+    Args:
+        model: Camera model used to normalize detected image points.
+        target_points: Calibration target 3D points, shape (N, 3).
+        frames: Detected calibration frames.
+
+    Returns:
+        Tuple of camera-from-target transforms, per-frame solved mask, and mean
+        squared reprojection error.
+    """
+    normalized_K = np.eye(3, dtype=np.float64)
+    zero_distortion = np.zeros(4, dtype=np.float64)
+
+    cameras_from_target: list[Pose] = []
+    solved: list[bool] = []
+    total_squared_error = 0.0
+    total_points = 0
+
+    for frame in frames:
+        obj_pts = np.ascontiguousarray(
+            target_points[frame.target_point_indices], dtype=np.float64
+        )
+        normalized_points_in_camera = model.normalize_points(
+            frame.detected_points_in_image
+        )
+        normalized_xy = np.ascontiguousarray(
+            normalized_points_in_camera[:, :2],
+            dtype=np.float64,
+        )
+
+        if len(obj_pts) < 4:
+            cameras_from_target.append(Pose.identity())
+            solved.append(False)
+            continue
+
+        success, rvec, tvec = cv2.solvePnP(
+            obj_pts,
+            normalized_xy,
+            normalized_K,
+            zero_distortion,
+        )
+        if not success:
+            cameras_from_target.append(Pose.identity())
+            solved.append(False)
+            continue
+
+        camera_from_target = Pose.from_rotvec_trans(
+            rotvec=rvec.flatten(), trans=tvec.flatten()
+        )
+        cameras_from_target.append(camera_from_target)
+        points_in_cam = camera_from_target.apply(obj_pts)
+        projected = model.project_points(points_in_cam)
+        total_squared_error += float(
+            np.sum((projected - frame.detected_points_in_image) ** 2)
+        )
+        total_points += len(obj_pts)
+        solved.append(True)
+
+    mean_error = float("inf")
+    if total_points > 0:
+        mean_error = total_squared_error / total_points
+    return cameras_from_target, solved, mean_error
 
 
 def _get_initial_state_with_pnp(
     config: OpenCVConfig,
     target_points: np.ndarray,
     frames: list[Frame],
+    initial_camera_model: OpenCV | None = None,
 ) -> tuple[OpenCV, list[Pose], list[bool]]:
     """Estimate initial intrinsics and poses using PnP.
 
-    If ``config.initial_focal_length`` is set, uses that value directly.
-    Otherwise, sweeps log-spaced candidate focal lengths and picks the one
-    with the lowest total reprojection error.
+    If an initial model is supplied, uses it directly. Otherwise, uses
+    ``config.initial_focal_length`` when set. As a final fallback, sweeps
+    log-spaced candidate focal lengths and picks the one with the lowest
+    total reprojection error.
 
     Args:
         config: Camera model configuration.
         target_points: Calibration target 3D points, shape (N, 3).
         frames: Detected calibration frames.
+        initial_camera_model: Optional initial intrinsics to optimize from.
 
     Returns:
         Tuple of (initial intrinsics, poses, solved mask).
     """
+    if initial_camera_model is not None:
+        cameras_from_target, solved, _ = _solve_pnp_all_frames(
+            initial_camera_model.K(),
+            target_points,
+            frames,
+            initial_camera_model.distortion_coeffs,
+        )
+        return initial_camera_model, cameras_from_target, solved
+
     cx = config.image_width / 2.0
     cy = config.image_height / 2.0
 
@@ -448,7 +534,9 @@ def _make_warp_coordinates(target_points: np.ndarray) -> WarpCoordinates | None:
     centered = target_points - centroid
     _, s, Vt = np.linalg.svd(centered, full_matrices=False)
 
-    planarity_ratio = s[2] / s[1] if s[1] > 1e-10 else np.inf
+    planarity_ratio = np.inf
+    if s[1] > 1e-10:
+        planarity_ratio = s[2] / s[1]
     if planarity_ratio > _PLANARITY_RATIO_THRESHOLD:
         warn(
             "Target warp can only be estimated with a planar target "
@@ -562,10 +650,15 @@ def _recover_failed_pnp(
     n_re_solved = sum(re_solved)
     log(f"Re-PnP solved {n_re_solved}/{len(frames)} frames")
 
-    poses: list[Pose | None] = [p if ok else None for p, ok in zip(re_poses, re_solved)]
-    inlier_masks: list[np.ndarray | None] = [
-        np.ones(len(f), dtype=bool) if ok else None for f, ok in zip(frames, re_solved)
-    ]
+    poses: list[Pose | None] = []
+    inlier_masks: list[np.ndarray | None] = []
+    for frame, camera_from_target, ok in zip(frames, re_poses, re_solved):
+        if ok:
+            poses.append(camera_from_target)
+            inlier_masks.append(np.ones(len(frame), dtype=bool))
+            continue
+        poses.append(None)
+        inlier_masks.append(None)
     return model, poses, inlier_masks
 
 
@@ -575,6 +668,7 @@ def _opencv_calibrate(
     config: OpenCVConfig,
     outlier_threshold_stddevs: float | None,
     estimate_target_warp: bool,
+    initial_camera_model: OpenCV | None = None,
 ) -> CalibrationResult[OpenCV]:
     assert target_points.ndim == 2 and target_points.shape[1] == 3, (
         f"Expected (N, 3) target_points, got {target_points.shape}"
@@ -584,7 +678,7 @@ def _opencv_calibrate(
     )
     log("Computing initial poses with PnP...")
     initial_intrinsics, initial_poses, pnp_solved = _get_initial_state_with_pnp(
-        config, target_points, frames
+        config, target_points, frames, initial_camera_model
     )
 
     n_solved = sum(pnp_solved)
@@ -593,12 +687,15 @@ def _opencv_calibrate(
     if n_failed > 0:
         log(f"{n_failed} frame(s) failed PnP, excluding from optimization")
 
-    poses: list[Pose | None] = [
-        p if ok else None for p, ok in zip(initial_poses, pnp_solved)
-    ]
-    inlier_masks: list[np.ndarray | None] = [
-        np.ones(len(f), dtype=bool) if ok else None for f, ok in zip(frames, pnp_solved)
-    ]
+    poses: list[Pose | None] = []
+    inlier_masks: list[np.ndarray | None] = []
+    for frame, camera_from_target, ok in zip(frames, initial_poses, pnp_solved):
+        if ok:
+            poses.append(camera_from_target)
+            inlier_masks.append(np.ones(len(frame), dtype=bool))
+            continue
+        poses.append(None)
+        inlier_masks.append(None)
 
     warp_coordinates = None
     if estimate_target_warp:
@@ -657,21 +754,25 @@ def _opencv_calibrate(
 
 def _pinhole_splined_refine_inner(
     batch: _OptimizationBatch[PinholeSplined],
+    config: PinholeSplinedConfig,
     target_points: np.ndarray,
     warp_coordinates: WarpCoordinates | None,
 ) -> _OptimizationBatch[PinholeSplined]:
+    warp_coordinates_cpp = None
+    if warp_coordinates is not None:
+        warp_coordinates_cpp = warp_coordinates._to_cpp()
+    warp_coeffs_initial = [0.0] * 5
+    if batch.warp_coeffs is not None:
+        warp_coeffs_initial = list(batch.warp_coeffs)
+
     fine_tune_result = lbb.fine_tune_pinhole_splined(
-        model_config=batch.intrinsics._cpp_config(),
+        model_config=_pinhole_splined_cpp_optimization_config(batch.intrinsics, config),
         intrinsics_parameters=batch.intrinsics._cpp_params(),
         cameras_from_target=[pose._to_cpp() for pose in batch.cameras_from_target],
         target_points=list(target_points),
         frames=[f._to_cpp() for f in batch.frames],
-        warp_coordinates=(
-            warp_coordinates._to_cpp() if warp_coordinates is not None else None
-        ),
-        warp_coeffs_initial=(
-            list(batch.warp_coeffs) if batch.warp_coeffs is not None else [0.0] * 5
-        ),
+        warp_coordinates=warp_coordinates_cpp,
+        warp_coeffs_initial=warp_coeffs_initial,
     )
 
     out_coeffs: tuple[float, float, float, float, float] | None = None
@@ -717,6 +818,30 @@ def _compute_fov_from_opencv(
     return (
         min(opencv_model.fov_deg_x * (1 + padding_fraction), max_fov_deg),
         min(opencv_model.fov_deg_y * (1 + padding_fraction), max_fov_deg),
+    )
+
+
+def _pinhole_splined_cpp_optimization_config(
+    model: PinholeSplined,
+    config: PinholeSplinedConfig,
+) -> lbb.PinholeSplinedOptimizationConfig:
+    """Build the C++ spline optimizer config from model geometry and fit config.
+
+    Args:
+        model: Camera model providing the fitted FOV.
+        config: Calibration config providing optimizer settings.
+
+    Returns:
+        C++ spline config for the optimizer.
+    """
+    return lbb.PinholeSplinedOptimizationConfig(
+        config.image_width,
+        config.image_height,
+        model.fov_deg_x,
+        model.fov_deg_y,
+        config.num_knots_x,
+        config.num_knots_y,
+        config.smoothness_lambda,
     )
 
 
@@ -885,7 +1010,7 @@ def _estimate_spline_fov(
 
     coarse_nx = min(config.num_knots_x, 10)
     coarse_ny = min(config.num_knots_y, 8)
-    coarse_cpp_config = lbb.PinholeSplinedConfig(
+    coarse_cpp_config = lbb.PinholeSplinedOptimizationConfig(
         config.image_width,
         config.image_height,
         coarse_fov_x,
@@ -917,7 +1042,6 @@ def _estimate_spline_fov(
         num_knots_y=coarse_ny,
         fov_deg_x=coarse_fov_x,
         fov_deg_y=coarse_fov_y,
-        smoothness_lambda=1.0,
     )
 
     all_pnp = opencv_result.cameras_from_target
@@ -932,6 +1056,14 @@ def _estimate_spline_fov(
             cameras_from_target=solved_poses,
             frames=solved_frames,
             warp_coeffs=None,
+        ),
+        PinholeSplinedConfig(
+            image_height=config.image_height,
+            image_width=config.image_width,
+            num_knots_x=coarse_nx,
+            num_knots_y=coarse_ny,
+            fov_deg_xy=(coarse_fov_x, coarse_fov_y),
+            smoothness_lambda=1.0,
         ),
         target_points,
         None,
@@ -968,7 +1100,7 @@ def _build_initial_spline_model(
     Returns:
         Initial PinholeSplined model with knots matched to the OpenCV distortion.
     """
-    cpp_config = lbb.PinholeSplinedConfig(
+    cpp_config = lbb.PinholeSplinedOptimizationConfig(
         config.image_width,
         config.image_height,
         fov_deg_x,
@@ -1003,7 +1135,6 @@ def _build_initial_spline_model(
         num_knots_y=config.num_knots_y,
         fov_deg_x=fov_deg_x,
         fov_deg_y=fov_deg_y,
-        smoothness_lambda=config.smoothness_lambda,
     )
 
 
@@ -1013,6 +1144,7 @@ def _calibrate_pinhole_splined(
     config: PinholeSplinedConfig,
     outlier_threshold_stddevs: float | None,
     estimate_target_warp: bool,
+    initial_camera_model: PinholeSplined | None = None,
 ) -> CalibrationResult[PinholeSplined]:
     assert target_points.ndim == 2 and target_points.shape[1] == 3, (
         f"Expected (N, 3) target_points, got {target_points.shape}"
@@ -1021,57 +1153,68 @@ def _calibrate_pinhole_splined(
         f"Expected floating dtype for target_points, got {target_points.dtype}"
     )
 
-    # Stage 1: Fit OpenCV seed on subsampled frames
-    opencv_result, sub_indices = _fit_opencv_seed(target_points, frames, config)
-    opencv_model = opencv_result.camera_model
+    if initial_camera_model is None:
+        # Stage 1: Fit OpenCV seed on subsampled frames
+        opencv_result, sub_indices = _fit_opencv_seed(target_points, frames, config)
+        opencv_model = opencv_result.camera_model
 
-    opencv_fov_x, opencv_fov_y = _compute_fov_from_opencv(
-        opencv_model, padding_fraction=0.0
-    )
+        opencv_fov_x, opencv_fov_y = _compute_fov_from_opencv(
+            opencv_model, padding_fraction=0.0
+        )
 
-    # Stage 2: Determine spline FOV
-    if config.fov_deg_xy is not None:
-        fov_deg_x, fov_deg_y = config.fov_deg_xy
-        log(f"Spline FOV (user-specified): {fov_deg_x:.1f}° x {fov_deg_y:.1f}°")
-    else:
-        fov_deg_x, fov_deg_y = _estimate_spline_fov(
+        # Stage 2: Determine spline FOV
+        if config.fov_deg_xy is not None:
+            fov_deg_x, fov_deg_y = config.fov_deg_xy
+            log(f"Spline FOV (user-specified): {fov_deg_x:.1f}° x {fov_deg_y:.1f}°")
+        else:
+            fov_deg_x, fov_deg_y = _estimate_spline_fov(
+                opencv_model,
+                opencv_result,
+                frames,
+                sub_indices,
+                target_points,
+                config,
+                opencv_fov_x,
+                opencv_fov_y,
+            )
+
+        # Stage 3: Build full spline model
+        prior_model = _build_initial_spline_model(
             opencv_model,
-            opencv_result,
-            frames,
-            sub_indices,
-            target_points,
             config,
+            fov_deg_x,
+            fov_deg_y,
             opencv_fov_x,
             opencv_fov_y,
         )
 
-    # Stage 3: Build and fit full spline model
-    prior_model = _build_initial_spline_model(
-        opencv_model,
-        config,
-        fov_deg_x,
-        fov_deg_y,
-        opencv_fov_x,
-        opencv_fov_y,
-    )
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames(
+            opencv_model.K(),
+            target_points,
+            frames,
+            dist_coeffs=opencv_model.distortion_coeffs,
+        )
+    else:
+        prior_model = initial_camera_model
+        log("Using user-provided initial spline model")
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            prior_model,
+            target_points,
+            frames,
+        )
 
-    # PnP for all frames using the opencv model
-    all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames(
-        opencv_model.K(),
-        target_points,
-        frames,
-        dist_coeffs=opencv_model.distortion_coeffs,
-    )
     n_solved = sum(pnp_solved_mask)
     log(f"PnP solved {n_solved}/{len(frames)} frames")
 
-    poses: list[Pose | None] = [
-        p if ok else None for p, ok in zip(all_poses_pnp, pnp_solved_mask)
-    ]
-    inlier_masks: list[np.ndarray | None] = [
-        np.ones(len(f), dtype=bool) if ok else None
-        for f, ok in zip(frames, pnp_solved_mask)
-    ]
+    poses: list[Pose | None] = []
+    inlier_masks: list[np.ndarray | None] = []
+    for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
+        if ok:
+            poses.append(camera_from_target)
+            inlier_masks.append(np.ones(len(frame), dtype=bool))
+            continue
+        poses.append(None)
+        inlier_masks.append(None)
 
     warp_coordinates = None
     if estimate_target_warp:
@@ -1080,7 +1223,12 @@ def _calibrate_pinhole_splined(
     def optimize_fn(
         batch: _OptimizationBatch[PinholeSplined],
     ) -> _OptimizationBatch[PinholeSplined]:
-        return _pinhole_splined_refine_inner(batch, target_points, warp_coordinates)
+        return _pinhole_splined_refine_inner(
+            batch,
+            config,
+            target_points,
+            warp_coordinates,
+        )
 
     state = _run_with_outlier_filtering(
         optimize_fn,
@@ -1118,11 +1266,103 @@ def _calibrate_pinhole_splined(
     )
 
 
+def _validate_opencv_initial_model_config(
+    config: OpenCVConfig,
+    initial_camera_model: OpenCV,
+) -> None:
+    """Validate that an OpenCV config could have produced an initial model.
+
+    Args:
+        config: Camera model configuration.
+        initial_camera_model: Initial model to optimize from.
+    """
+    if config.image_width != initial_camera_model.image_width:
+        raise ValueError(
+            "Initial OpenCV model image_width is incompatible with config: "
+            f"{initial_camera_model.image_width} != {config.image_width}"
+        )
+    if config.image_height != initial_camera_model.image_height:
+        raise ValueError(
+            "Initial OpenCV model image_height is incompatible with config: "
+            f"{initial_camera_model.image_height} != {config.image_height}"
+        )
+
+    disabled = ~config.included_distortion_coefficients
+    if not np.allclose(initial_camera_model.distortion_coeffs[disabled], 0.0):
+        disabled_indices = np.where(disabled)[0].tolist()
+        raise ValueError(
+            "Initial OpenCV model has non-zero distortion coefficients that "
+            f"are disabled by the config: {disabled_indices}"
+        )
+
+
+def _validate_spline_initial_model_config(
+    config: PinholeSplinedConfig,
+    initial_camera_model: PinholeSplined,
+) -> None:
+    """Validate that a spline config could have produced an initial model.
+
+    Args:
+        config: Camera model configuration.
+        initial_camera_model: Initial model to optimize from.
+    """
+    if config.image_width != initial_camera_model.image_width:
+        raise ValueError(
+            "Initial spline model image_width is incompatible with config: "
+            f"{initial_camera_model.image_width} != {config.image_width}"
+        )
+    if config.image_height != initial_camera_model.image_height:
+        raise ValueError(
+            "Initial spline model image_height is incompatible with config: "
+            f"{initial_camera_model.image_height} != {config.image_height}"
+        )
+
+    if initial_camera_model.num_knots_x != config.num_knots_x:
+        raise ValueError(
+            "Initial spline num_knots_x is incompatible with config: "
+            f"{initial_camera_model.num_knots_x} != {config.num_knots_x}"
+        )
+    if initial_camera_model.num_knots_y != config.num_knots_y:
+        raise ValueError(
+            "Initial spline num_knots_y is incompatible with config: "
+            f"{initial_camera_model.num_knots_y} != {config.num_knots_y}"
+        )
+
+    expected_shape = (config.num_knots_y, config.num_knots_x)
+    if initial_camera_model.dx_grid.shape != expected_shape:
+        raise ValueError(
+            "Initial spline dx_grid shape is incompatible with config: "
+            f"{initial_camera_model.dx_grid.shape} != {expected_shape}"
+        )
+    if initial_camera_model.dy_grid.shape != expected_shape:
+        raise ValueError(
+            "Initial spline dy_grid shape is incompatible with config: "
+            f"{initial_camera_model.dy_grid.shape} != {expected_shape}"
+        )
+
+    if config.fov_deg_xy is None:
+        return
+
+    fov_deg_x, fov_deg_y = config.fov_deg_xy
+    if not np.isclose(initial_camera_model.fov_deg_x, fov_deg_x):
+        raise ValueError(
+            "Initial spline fov_deg_x is incompatible with config: "
+            f"{initial_camera_model.fov_deg_x} != {fov_deg_x}"
+        )
+    if not np.isclose(initial_camera_model.fov_deg_y, fov_deg_y):
+        raise ValueError(
+            "Initial spline fov_deg_y is incompatible with config: "
+            f"{initial_camera_model.fov_deg_y} != {fov_deg_y}"
+        )
+
+
 @overload
 def calibrate_camera(
     target_points: np.ndarray,
     frames: list[Frame],
+    *,
     camera_model_config: PinholeSplinedConfig,
+    initial_camera_model: PinholeSplined | None = None,
     estimate_target_warp: bool = True,
     outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
 ) -> CalibrationResult[PinholeSplined]: ...
@@ -1132,7 +1372,9 @@ def calibrate_camera(
 def calibrate_camera(
     target_points: np.ndarray,
     frames: list[Frame],
+    *,
     camera_model_config: OpenCVConfig,
+    initial_camera_model: OpenCV | None = None,
     estimate_target_warp: bool = True,
     outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
 ) -> CalibrationResult[OpenCV]: ...
@@ -1141,7 +1383,9 @@ def calibrate_camera(
 def calibrate_camera(
     target_points: np.ndarray,
     frames: list[Frame],
+    *,
     camera_model_config: CameraModelConfig,
+    initial_camera_model: CameraModel | None = None,
     estimate_target_warp: bool = True,
     outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
 ) -> CalibrationResult:
@@ -1154,6 +1398,7 @@ def calibrate_camera(
         target_points: 3D target point coordinates, shape (N, 3).
         frames: Per-image frames, one per calibration image.
         camera_model_config: Specifies the camera model to fit.
+        initial_camera_model: Optional initial model to optimize from.
         estimate_target_warp: Whether to estimate a Legendre-polynomial warp
             of the target to account for slight non-planarity.
         outlier_threshold_stddevs: Sigma threshold for outlier rejection.
@@ -1169,21 +1414,41 @@ def calibrate_camera(
         f"Expected floating dtype for target_points, got {target_points.dtype}"
     )
     if isinstance(camera_model_config, PinholeSplinedConfig):
+        if initial_camera_model is not None:
+            if not isinstance(initial_camera_model, PinholeSplined):
+                raise TypeError(
+                    "initial_camera_model must be a PinholeSplined when "
+                    "camera_model_config is a PinholeSplinedConfig"
+                )
+            _validate_spline_initial_model_config(
+                camera_model_config, initial_camera_model
+            )
         return _calibrate_pinhole_splined(
             target_points,
             frames,
             camera_model_config,
             outlier_threshold_stddevs,
             estimate_target_warp,
+            initial_camera_model,
         )
 
     if isinstance(camera_model_config, OpenCVConfig):
+        if initial_camera_model is not None:
+            if not isinstance(initial_camera_model, OpenCV):
+                raise TypeError(
+                    "initial_camera_model must be an OpenCV when "
+                    "camera_model_config is an OpenCVConfig"
+                )
+            _validate_opencv_initial_model_config(
+                camera_model_config, initial_camera_model
+            )
         return _opencv_calibrate(
             target_points,
             frames,
             camera_model_config,
             outlier_threshold_stddevs,
             estimate_target_warp,
+            initial_camera_model,
         )
 
     raise RuntimeError("Invalid config")

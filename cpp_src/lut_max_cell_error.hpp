@@ -22,7 +22,7 @@ namespace py = pybind11;
 // interpolation_mode: 0=nearest, 1=bilinear, 2=bicubic.
 
 py::array_t<double> max_cell_errors_pinhole_splined(
-    PinholeSplinedConfig& config,
+    PinholeSplinedModelDefinition& config,
     PinholeSplinedIntrinsicsParameters& intrinsics,
     py::array_t<double, py::array::c_style | py::array::forcecast> lut_xy_grid,
     int image_width,

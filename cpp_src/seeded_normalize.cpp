@@ -330,7 +330,7 @@ template <typename T>
 static inline void forward_splined(
     const T& normalized_x,
     const T& normalized_y,
-    PinholeSplinedConfig* config,
+    PinholeSplinedModelDefinition* config,
     const T* pinhole_params,
     const T* dx_grid,
     const T* dy_grid,
@@ -414,7 +414,7 @@ struct SplineConstants {
     double fx, fy, cx, cy;
 
     explicit SplineConstants(
-        PinholeSplinedConfig* config,
+        PinholeSplinedModelDefinition* config,
         const double* pinhole_params
     )
         : num_knots_x((int)config->num_knots_x),
@@ -789,7 +789,7 @@ py::array_t<double> seeded_normalize_splined(
     int seed_width,
     int seed_height,
     py::array_t<double, py::array::c_style | py::array::forcecast> query_pixels,
-    PinholeSplinedConfig& config,
+    PinholeSplinedModelDefinition& config,
     PinholeSplinedIntrinsicsParameters& params
 ) {
     auto seed_pixels_buffer = seed_pixels.request();

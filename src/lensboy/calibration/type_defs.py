@@ -209,19 +209,18 @@ class CalibrationResult(Generic[IntrinsicsT]):
         sigma = self.residual_sigma_map()
         n_out = self.num_outliers()
         n_det = self.num_detections()
+        residual_line_suffix = "\n"
+        target_warp_line = ""
+        if self.target_warp is not None:
+            residual_line_suffix = ",\n"
+            target_warp_line = f"  target_warp={self.target_warp!r}\n"
         return (
             f"CalibrationResult(\n"
             f"  model={model!r},\n"
             f"  frames={len(self.frames)}, "
             f"detections={n_det}, outliers={n_out},\n"
             f"  residual_sigma={sigma:.4f}px"
-            f"{',' if self.target_warp is not None else ''}\n"
-            + (
-                f"  target_warp={self.target_warp!r}\n"
-                if self.target_warp is not None
-                else ""
-            )
-            + ")"
+            f"{residual_line_suffix}" + target_warp_line + ")"
         )
 
     def residual_sigma_map(self) -> float:
@@ -695,7 +694,9 @@ class CalibrationResult(Generic[IntrinsicsT]):
         fi = self.frame_diagnostics[index]
         if fi is None:
             raise ValueError(f"Frame {index} has no diagnostics (PnP failed)")
-        image = images[index] if images is not None else None
+        image = None
+        if images is not None:
+            image = images[index]
         return _plot_frame_residuals(
             self.frames[index],
             fi,
