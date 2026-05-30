@@ -175,7 +175,11 @@ class PinholeRemapped(CameraModel):
                 f"{(self.input_image_height, self.input_image_width)}"
             )
 
-        border_scalar = (float(border_value),) if isinstance(border_value, (int, float)) else border_value
+        border_scalar = (
+            (float(border_value),)
+            if isinstance(border_value, (int, float))
+            else border_value
+        )
         return cv2.remap(
             image,
             map_x,
