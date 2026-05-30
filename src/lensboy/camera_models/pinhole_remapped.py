@@ -175,13 +175,18 @@ class PinholeRemapped(CameraModel):
                 f"{(self.input_image_height, self.input_image_width)}"
             )
 
+        border_scalar = (
+            (float(border_value),)
+            if isinstance(border_value, (int, float))
+            else border_value
+        )
         return cv2.remap(
             image,
             map_x,
             map_y,
             interpolation=interpolation,
             borderMode=border_mode,
-            borderValue=border_value,
+            borderValue=border_scalar,
         )
 
     def normalize_points(self, pixel_coords: np.ndarray) -> np.ndarray:
