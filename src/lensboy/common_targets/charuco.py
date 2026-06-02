@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 from lensboy._logging import log, progress
-from lensboy.analysis.image import to_gray
+from lensboy.image import to_gray
 from lensboy.calibration.calibrate import Frame
 
 
