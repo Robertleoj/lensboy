@@ -2,8 +2,8 @@ import cv2
 import numpy as np
 
 from lensboy._logging import log, progress
-from lensboy.image import to_gray
 from lensboy.calibration.calibrate import Frame
+from lensboy.image import to_gray
 
 
 def _detect_charuco(img: np.ndarray, board: cv2.aruco.CharucoBoard) -> Frame | None:
