@@ -16,7 +16,7 @@ from matplotlib.patches import Circle
 
 import lensboy as lb
 from lensboy._logging import log
-from lensboy.analysis.image import to_color
+from lensboy.image import to_color
 from lensboy.analysis.utils import rot_euler
 
 
