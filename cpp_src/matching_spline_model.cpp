@@ -1,6 +1,8 @@
 #include <ceres/ceres.h>
 #include <pybind11/numpy.h>
 #include <spdlog/spdlog.h>
+#include <algorithm>
+#include <vector>
 #include "./cameramodels.hpp"
 #include "./utils.hpp"
 
@@ -137,6 +139,64 @@ struct DistortionError {
     double y_normalized;
     double opencv_distorted_x;
     double opencv_distorted_y;
+};
+
+struct StereographicOpenCVError {
+    StereographicOpenCVError(
+        const double stereographic_x,
+        const double stereographic_y,
+        const double target_pixel_x,
+        const double target_pixel_y
+    )
+        : stereographic_x(stereographic_x),
+          stereographic_y(stereographic_y),
+          target_pixel_x(target_pixel_x),
+          target_pixel_y(target_pixel_y) {}
+
+    template <typename T>
+    bool operator()(
+        const T* const intrinsics,
+        T* residuals
+    ) const {
+        const T sx = T(stereographic_x);
+        const T sy = T(stereographic_y);
+        const T r_s = sqrt(sx * sx + sy * sy + T(1e-30));
+        const T theta = T(2) * atan(r_s / T(2));
+        const T r_n = tan(theta);
+        const T scale = r_n / r_s;
+
+        const Vec3<T> point_in_camera(sx * scale, sy * scale, T(1));
+        Vec2<T> image_point;
+        project_opencv(intrinsics, point_in_camera, image_point);
+
+        residuals[0] = image_point[0] - T(target_pixel_x);
+        residuals[1] = image_point[1] - T(target_pixel_y);
+        return true;
+    }
+
+    static ceres::CostFunction* Create(
+        const double stereographic_x,
+        const double stereographic_y,
+        const double target_pixel_x,
+        const double target_pixel_y
+    ) {
+        return new ceres::AutoDiffCostFunction<
+            StereographicOpenCVError,
+            2,
+            18>(
+            new StereographicOpenCVError(
+                stereographic_x,
+                stereographic_y,
+                target_pixel_x,
+                target_pixel_y
+            )
+        );
+    }
+
+    double stereographic_x;
+    double stereographic_y;
+    double target_pixel_x;
+    double target_pixel_y;
 };
 
 py::dict get_matching_spline_distortion_model(
@@ -390,6 +450,95 @@ py::dict get_matching_spline_distortion_model(
     out["y_range_start"] = -map.half_y;
     out["y_range_end"] = map.half_y;
 
+    return out;
+}
+
+py::dict get_matching_stereographic_opencv_model(
+    uint32_t image_width,
+    uint32_t image_height,
+    double stereographic_focal_length,
+    std::vector<bool>& distortion_param_optimize_mask
+) {
+    if (distortion_param_optimize_mask.size() != 14) {
+        throw py::value_error(
+            "distortion_param_optimize_mask must have length 14"
+        );
+    }
+
+    const double cx = static_cast<double>(image_width) / 2.0;
+    const double cy = static_cast<double>(image_height) / 2.0;
+
+    std::vector<double> intrinsics(18, 0.0);
+    intrinsics[0] = stereographic_focal_length;
+    intrinsics[1] = stereographic_focal_length;
+    intrinsics[2] = cx;
+    intrinsics[3] = cy;
+
+    ceres::Problem problem;
+    problem.AddParameterBlock(intrinsics.data(), intrinsics.size());
+
+    std::vector<int> fixed_intrinsics_param_indices = {2, 3};
+    for (size_t param_idx = 0; param_idx < distortion_param_optimize_mask.size();
+         ++param_idx) {
+        if (distortion_param_optimize_mask[param_idx]) {
+            continue;
+        }
+        fixed_intrinsics_param_indices.push_back(static_cast<int>(4 + param_idx));
+    }
+
+    auto* manifold =
+        new ceres::SubsetManifold(intrinsics.size(), fixed_intrinsics_param_indices);
+    problem.SetManifold(intrinsics.data(), manifold);
+
+    const uint32_t num_samples_x = std::max<uint32_t>(32, image_width / 16);
+    const uint32_t num_samples_y = std::max<uint32_t>(24, image_height / 16);
+
+    for (uint32_t y_sample_idx = 0; y_sample_idx < num_samples_y;
+         ++y_sample_idx) {
+        for (uint32_t x_sample_idx = 0; x_sample_idx < num_samples_x;
+             ++x_sample_idx) {
+            const double x_proportion =
+                static_cast<double>(x_sample_idx) /
+                (static_cast<double>(num_samples_x) - 1.0);
+            const double y_proportion =
+                static_cast<double>(y_sample_idx) /
+                (static_cast<double>(num_samples_y) - 1.0);
+
+            const double pixel_x =
+                static_cast<double>(image_width - 1) * x_proportion;
+            const double pixel_y =
+                static_cast<double>(image_height - 1) * y_proportion;
+            const double stereographic_x =
+                (pixel_x - cx) / stereographic_focal_length;
+            const double stereographic_y =
+                (pixel_y - cy) / stereographic_focal_length;
+
+            problem.AddResidualBlock(
+                StereographicOpenCVError::Create(
+                    stereographic_x,
+                    stereographic_y,
+                    pixel_x,
+                    pixel_y
+                ),
+                nullptr,
+                intrinsics.data()
+            );
+        }
+    }
+
+    ceres::Solver::Options options;
+    options.num_threads = static_cast<int>(std::thread::hardware_concurrency());
+    options.linear_solver_type = ceres::DENSE_QR;
+    options.use_nonmonotonic_steps = true;
+    options.max_num_iterations = 10'000;
+    options.minimizer_progress_to_stdout = false;
+
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    py::dict out;
+    out["intrinsics"] = intrinsics;
+    out["final_cost"] = summary.final_cost;
     return out;
 }
 

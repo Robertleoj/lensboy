@@ -6,7 +6,7 @@ import collections.abc
 import numpy
 import numpy.typing
 import typing
-__all__: list[str] = ['PinholeSplinedIntrinsicsParameters', 'PinholeSplinedModelDefinition', 'PinholeSplinedOptimizationConfig', 'WarpCoordinates', 'add', 'calibrate_opencv', 'fine_tune_pinhole_splined', 'get_matching_spline_distortion_model', 'make_undistortion_maps_pinhole_splined', 'max_cell_errors_opencv', 'max_cell_errors_pinhole_splined', 'normalize_pinhole_splined_points', 'project_pinhole_splined_points', 'seeded_normalize_opencv', 'seeded_normalize_splined', 'set_log_level', 'warp_target_points']
+__all__: list[str] = ['PinholeSplinedIntrinsicsParameters', 'PinholeSplinedModelDefinition', 'PinholeSplinedOptimizationConfig', 'WarpCoordinates', 'add', 'calibrate_opencv', 'fine_tune_pinhole_splined', 'get_matching_spline_distortion_model', 'get_matching_stereographic_opencv_model', 'make_undistortion_maps_pinhole_splined', 'max_cell_errors_opencv', 'max_cell_errors_pinhole_splined', 'normalize_pinhole_splined_points', 'project_pinhole_splined_points', 'seeded_normalize_opencv', 'seeded_normalize_splined', 'set_log_level', 'warp_target_points']
 class PinholeSplinedIntrinsicsParameters:
     def __init__(self, pinhole_parameters: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], dx_grid: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], dy_grid: typing.Annotated[numpy.typing.ArrayLike, numpy.float64]) -> None:
         ...
@@ -114,6 +114,8 @@ def calibrate_opencv(intrinsics_initial_value: collections.abc.Sequence[typing.S
 def fine_tune_pinhole_splined(model_config: PinholeSplinedOptimizationConfig, intrinsics_parameters: PinholeSplinedIntrinsicsParameters, cameras_from_target: collections.abc.Sequence[typing.Annotated[numpy.typing.ArrayLike, numpy.float64, "[6, 1]"]], target_points: collections.abc.Sequence[typing.Annotated[numpy.typing.ArrayLike, numpy.float64, "[3, 1]"]], frames: collections.abc.Sequence[tuple[collections.abc.Sequence[typing.SupportsInt], collections.abc.Sequence[typing.Annotated[numpy.typing.ArrayLike, numpy.float64, "[2, 1]"]]]], warp_coordinates: WarpCoordinates | None = None, warp_coeffs_initial: typing.Annotated[collections.abc.Sequence[typing.SupportsFloat], "FixedSize(5)"] = [0.0, 0.0, 0.0, 0.0, 0.0]) -> dict:
     ...
 def get_matching_spline_distortion_model(opencv_distortion_params: collections.abc.Sequence[typing.SupportsFloat], model_config: PinholeSplinedOptimizationConfig, image_bound_x: typing.SupportsFloat, image_bound_y: typing.SupportsFloat) -> dict:
+    ...
+def get_matching_stereographic_opencv_model(image_width: typing.SupportsInt, image_height: typing.SupportsInt, stereographic_focal_length: typing.SupportsFloat, distortion_param_optimize_mask: collections.abc.Sequence[bool]) -> dict:
     ...
 def make_undistortion_maps_pinhole_splined(model_config: PinholeSplinedModelDefinition, intrinsics: PinholeSplinedIntrinsicsParameters, pinhole_parameters: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], image_size_wh: tuple[typing.SupportsInt, typing.SupportsInt]) -> tuple:
     ...
