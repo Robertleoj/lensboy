@@ -385,6 +385,165 @@ def _solve_pnp_all_frames(
     return poses, solved, mean_error
 
 
+def _stereographic_pixels_to_normalized_xy(
+    pixel_coords: np.ndarray,
+    focal_length: float,
+    cx: float,
+    cy: float,
+) -> np.ndarray:
+    """Unproject centered stereographic pixels to normalized pinhole coordinates.
+
+    Args:
+        pixel_coords: Image coordinates, shape (N, 2).
+        focal_length: Centered stereographic focal length.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Normalized coordinates, shape (N, 2).
+    """
+    sx = (pixel_coords[:, 0] - cx) / focal_length
+    sy = (pixel_coords[:, 1] - cy) / focal_length
+    r_s = np.sqrt(sx * sx + sy * sy + 1e-30)
+    theta = 2.0 * np.arctan(r_s / 2.0)
+    r_n = np.tan(theta)
+    scale = r_n / r_s
+    return np.column_stack([sx * scale, sy * scale])
+
+
+def _project_stereographic_points(
+    points_in_camera: np.ndarray,
+    focal_length: float,
+    cx: float,
+    cy: float,
+) -> np.ndarray:
+    """Project camera-frame points with a centered stereographic model.
+
+    Args:
+        points_in_camera: Camera-frame target points, shape (N, 3).
+        focal_length: Centered stereographic focal length.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Image coordinates, shape (N, 2).
+    """
+    normalized_x = points_in_camera[:, 0] / points_in_camera[:, 2]
+    normalized_y = points_in_camera[:, 1] / points_in_camera[:, 2]
+    r_n = np.sqrt(normalized_x * normalized_x + normalized_y * normalized_y + 1e-30)
+    theta = np.arctan(r_n)
+    scale = 2.0 * np.tan(theta / 2.0) / r_n
+    sx = normalized_x * scale
+    sy = normalized_y * scale
+    return np.column_stack([focal_length * sx + cx, focal_length * sy + cy])
+
+
+def _solve_pnp_all_frames_stereographic(
+    focal_length: float,
+    target_points: np.ndarray,
+    frames: list[Frame],
+    cx: float,
+    cy: float,
+) -> tuple[list[Pose], list[bool], float]:
+    """Run solvePnP with detections unprojected by a stereographic model.
+
+    Args:
+        focal_length: Centered stereographic focal length.
+        target_points: Calibration target 3D points, shape (N, 3).
+        frames: Detected calibration frames.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Tuple of (poses, solved mask, mean squared error per point).
+    """
+    normalized_K = np.eye(3, dtype=np.float64)
+    zero_distortion = np.zeros(4, dtype=np.float64)
+
+    poses: list[Pose] = []
+    solved: list[bool] = []
+    total_squared_error = 0.0
+    total_points = 0
+
+    for frame in frames:
+        obj_pts = np.ascontiguousarray(
+            target_points[frame.target_point_indices], dtype=np.float64
+        )
+        img_pts = np.ascontiguousarray(
+            frame.detected_points_in_image,
+            dtype=np.float64,
+        )
+
+        if len(obj_pts) < 4:
+            poses.append(Pose.identity())
+            solved.append(False)
+            continue
+
+        normalized_xy = _stereographic_pixels_to_normalized_xy(
+            img_pts,
+            focal_length,
+            cx,
+            cy,
+        )
+        success, rvec, tvec = cv2.solvePnP(
+            obj_pts,
+            normalized_xy,
+            normalized_K,
+            zero_distortion,
+        )
+        if not success:
+            poses.append(Pose.identity())
+            solved.append(False)
+            continue
+
+        camera_from_target = Pose.from_rotvec_trans(
+            rotvec=rvec.flatten(), trans=tvec.flatten()
+        )
+        poses.append(camera_from_target)
+        points_in_cam = camera_from_target.apply(obj_pts)
+        projected = _project_stereographic_points(points_in_cam, focal_length, cx, cy)
+        total_squared_error += float(np.sum((projected - img_pts) ** 2))
+        total_points += len(obj_pts)
+        solved.append(True)
+
+    mean_error = float("inf")
+    if total_points > 0:
+        mean_error = total_squared_error / total_points
+    return poses, solved, mean_error
+
+
+def _matching_opencv_model_from_stereographic(
+    config: OpenCVConfig,
+    focal_length: float,
+) -> OpenCV:
+    """Fit an OpenCV seed model that approximates centered stereographic projection.
+
+    Args:
+        config: Camera model configuration.
+        focal_length: Centered stereographic focal length.
+
+    Returns:
+        OpenCV camera model initialized from the fitted backend parameters.
+    """
+    matching_fn = getattr(lbb, "get_matching_stereographic_opencv_model")
+    out = matching_fn(
+        config.image_width,
+        config.image_height,
+        float(focal_length),
+        config.included_distortion_coefficients.tolist(),
+    )
+    params = np.asarray(out["intrinsics"], dtype=np.float64)
+    return OpenCV(
+        image_height=config.image_height,
+        image_width=config.image_width,
+        fx=float(params[0]),
+        fy=float(params[1]),
+        cx=float(params[2]),
+        cy=float(params[3]),
+        distortion_coeffs=params[4:],
+    )
+
+
 def _solve_pnp_all_frames_with_model(
     model: OpenCV | PinholeSplined,
     target_points: np.ndarray,
@@ -463,10 +622,10 @@ def _get_initial_state_with_pnp(
 ) -> tuple[OpenCV, list[Pose], list[bool]]:
     """Estimate initial intrinsics and poses using PnP.
 
-    If an initial model is supplied, uses it directly. Otherwise, uses
-    ``config.initial_focal_length`` when set. As a final fallback, sweeps
-    log-spaced candidate focal lengths and picks the one with the lowest
-    total reprojection error.
+    If an initial model is supplied, uses it directly. Otherwise, uses a
+    centered stereographic model for PnP, either at ``config.initial_focal_length``
+    or over a log-spaced focal-length sweep. The selected stereographic model is
+    then fit by a pinhole + OpenCV distortion model for the backend optimizer.
 
     Args:
         config: Camera model configuration.
@@ -490,8 +649,15 @@ def _get_initial_state_with_pnp(
     cy = config.image_height / 2.0
 
     if config.initial_focal_length is not None:
-        intrinsics = config.get_initial_value()
-        poses, solved, _ = _solve_pnp_all_frames(intrinsics.K(), target_points, frames)
+        focal_length = float(config.initial_focal_length)
+        poses, solved, _ = _solve_pnp_all_frames_stereographic(
+            focal_length,
+            target_points,
+            frames,
+            cx,
+            cy,
+        )
+        intrinsics = _matching_opencv_model_from_stereographic(config, focal_length)
         return intrinsics, poses, solved
 
     max_dim = max(config.image_width, config.image_height)
@@ -503,25 +669,22 @@ def _get_initial_state_with_pnp(
     best_solved: list[bool] = []
 
     for f in candidates:
-        K = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1]])
-        poses, solved, error = _solve_pnp_all_frames(K, target_points, frames)
+        poses, solved, error = _solve_pnp_all_frames_stereographic(
+            float(f),
+            target_points,
+            frames,
+            cx,
+            cy,
+        )
         if error < best_error:
             best_error = error
             best_focal = float(f)
             best_poses = poses
             best_solved = solved
 
-    log(f"Auto-estimated initial focal length: {best_focal:.1f} px")
+    log(f"Auto-estimated initial stereographic focal length: {best_focal:.1f} px")
 
-    intrinsics = OpenCV(
-        image_height=config.image_height,
-        image_width=config.image_width,
-        fx=best_focal,
-        fy=best_focal,
-        cx=cx,
-        cy=cy,
-        distortion_coeffs=np.zeros(14, dtype=np.float64),
-    )
+    intrinsics = _matching_opencv_model_from_stereographic(config, best_focal)
     return intrinsics, best_poses, best_solved
 
 

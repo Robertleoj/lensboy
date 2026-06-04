@@ -1,5 +1,6 @@
 """Integration tests using a real charuco dataset and synthetic data."""
 
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,7 @@ import lensboy as lb
 from lensboy.geometry.pose import Pose
 
 DATASET_PATH = Path(__file__).parent.parent / "data/test_datasets/wide_angle_charuco.npz"
+CUBISM_DATASET_PATH = Path(__file__).parent.parent / "data/test_datasets/cubism.json"
 
 
 def load_test_dataset() -> tuple[np.ndarray, list[lb.Frame], int, int]:
@@ -39,6 +41,35 @@ def load_test_dataset() -> tuple[np.ndarray, list[lb.Frame], int, int]:
     return target_points, frames, image_height, image_width
 
 
+def load_cubism_dataset() -> tuple[np.ndarray, list[lb.Frame], int, int]:
+    """Load the cubism JSON test dataset.
+
+    Returns:
+        target_points: 3D target coordinates, shape (N, 3).
+        frames: Per-image detection frames.
+        image_height: Image height in pixels.
+        image_width: Image width in pixels.
+    """
+    data = json.loads(CUBISM_DATASET_PATH.read_text())
+    target_points = np.asarray(data["target_points"], dtype=np.float64)
+
+    image_size = data["image_size"]
+    image_height = int(image_size["height"])
+    image_width = int(image_size["width"])
+
+    frames = [
+        lb.Frame(
+            target_point_indices=np.asarray(
+                detection["target_point_ids"], dtype=np.int32
+            ),
+            detected_points_in_image=np.asarray(detection["pixels"], dtype=np.float64),
+        )
+        for detection in data["detections"]
+    ]
+
+    return target_points, frames, image_height, image_width
+
+
 def test_opencv_full14() -> None:
     """Calibrate an OpenCV model with all 14 distortion coefficients."""
     target_points, frames, img_h, img_w = load_test_dataset()
@@ -56,6 +87,21 @@ def test_opencv_full14() -> None:
     assert sigma < 0.11, f"Residual sigma too high: {sigma:.3f}px"
     assert outlier_pct < 1.2, f"Too many outliers: {outlier_pct:.1f}%"
 
+    _check_frame_projections(result, target_points, frames)
+
+
+def test_cubism_opencv_full14() -> None:
+    """Calibrate an OpenCV model from the cubism dataset."""
+    target_points, frames, img_h, img_w = load_cubism_dataset()
+
+    config = lb.OpenCVConfig(
+        image_height=img_h,
+        image_width=img_w,
+        included_distortion_coefficients=lb.OpenCVConfig.FULL_14,
+    )
+    result = lb.calibrate_camera(target_points, frames, camera_model_config=config)
+
+    _check_cubism_calibration_quality(result, max_sigma=0.25, max_outlier_pct=1.0)
     _check_frame_projections(result, target_points, frames)
 
 
@@ -149,6 +195,22 @@ def test_spline_30x20() -> None:
     assert sigma < 0.09, f"Residual sigma too high: {sigma:.3f}px"
     assert outlier_pct < 1.6, f"Too many outliers: {outlier_pct:.1f}%"
 
+    _check_frame_projections(result, target_points, frames)
+
+
+def test_cubism_spline_30x20() -> None:
+    """Calibrate a 30x20 spline model from the cubism dataset."""
+    target_points, frames, img_h, img_w = load_cubism_dataset()
+
+    config = lb.PinholeSplinedConfig(
+        img_h,
+        img_w,
+        num_knots_x=30,
+        num_knots_y=20,
+    )
+    result = lb.calibrate_camera(target_points, frames, camera_model_config=config)
+
+    _check_cubism_calibration_quality(result, max_sigma=0.25, max_outlier_pct=1.0)
     _check_frame_projections(result, target_points, frames)
 
 
@@ -354,6 +416,25 @@ def _check_frame_projections(
         np.testing.assert_allclose(
             expected_residuals, fi.residuals, atol=1e-6, err_msg=f"Frame {i}"
         )
+
+
+def _check_cubism_calibration_quality(
+    result: lb.CalibrationResult,
+    *,
+    max_sigma: float,
+    max_outlier_pct: float,
+) -> None:
+    solved_frames = sum(
+        frame_diagnostics is not None for frame_diagnostics in result.frame_diagnostics
+    )
+    sigma = result.residual_sigma_map()
+    outlier_pct = result.num_outliers() / result.num_detections() * 100
+
+    assert solved_frames == len(result.frames), (
+        f"Expected all cubism frames to solve, got {solved_frames}/{len(result.frames)}"
+    )
+    assert sigma < max_sigma, f"Residual sigma too high: {sigma:.3f}px"
+    assert outlier_pct < max_outlier_pct, f"Too many outliers: {outlier_pct:.1f}%"
 
 
 # ---------------------------------------------------------------------------

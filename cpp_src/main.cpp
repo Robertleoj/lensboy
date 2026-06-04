@@ -247,6 +247,15 @@ PYBIND11_MODULE(
     );
 
     m.def(
+        "get_matching_stereographic_opencv_model",
+        &lensboy::get_matching_stereographic_opencv_model,
+        py::arg("image_width"),
+        py::arg("image_height"),
+        py::arg("stereographic_focal_length"),
+        py::arg("distortion_param_optimize_mask")
+    );
+
+    m.def(
         "fine_tune_pinhole_splined",
         &lensboy::fine_tune_pinhole_splined,
         py::arg("model_config"),
