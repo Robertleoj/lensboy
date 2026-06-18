@@ -25,7 +25,7 @@ def _detect_charuco(img: np.ndarray, board: cv2.aruco.CharucoBoard) -> Frame | N
     if charuco_ids is None:
         return None
 
-    return Frame(charuco_ids.squeeze(), charuco_corners.squeeze(1))
+    return Frame(charuco_ids.squeeze(1), charuco_corners.squeeze(1))
 
 
 def extract_frames_from_charuco(
