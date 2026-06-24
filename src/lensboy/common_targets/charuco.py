@@ -14,7 +14,7 @@ def _detect_charuco(
     charuco_parameters: cv2.aruco.CharucoParameters | None = None,
 ) -> Frame | None:
 
-    charuco_param = (
+    charuco_params = (
         cv2.arcuo.CharucoParameters()
         if charuco_parameters is None
         else charuco_parameters
