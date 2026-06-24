@@ -6,6 +6,35 @@ from lensboy.calibration.calibrate import Frame
 from lensboy.image import to_gray
 
 
+def default_detector_parameters() -> cv2.aruco.DetectorParameters:
+    """Create default ArUco detector parameters.
+
+    Returns:
+        Detector parameters configured with OpenCV defaults.
+    """
+    return cv2.aruco.DetectorParameters()
+
+
+def default_refine_parameters() -> cv2.aruco.RefineParameters:
+    """Create default ArUco marker refinement parameters.
+
+    Returns:
+        Refinement parameters configured with OpenCV defaults.
+    """
+    return cv2.aruco.RefineParameters()
+
+
+def default_charuco_parameters() -> cv2.aruco.CharucoParameters:
+    """Create default ChArUco detection parameters.
+
+    Returns:
+        ChArUco parameters configured to allow one marker per interpolated corner.
+    """
+    params = cv2.aruco.CharucoParameters()
+    params.minMarkers = 1
+    return params
+
+
 def _detect_charuco(
     img: np.ndarray,
     board: cv2.aruco.CharucoBoard,
@@ -13,25 +42,18 @@ def _detect_charuco(
     detector_parameters: cv2.aruco.DetectorParameters | None = None,
     charuco_parameters: cv2.aruco.CharucoParameters | None = None,
 ) -> Frame | None:
-    charuco_params = (
-        cv2.aruco.CharucoParameters()
-        if charuco_parameters is None
-        else charuco_parameters
-    )
-    refine_params = (
-        cv2.aruco.RefineParameters() if refine_parameters is None else refine_parameters
-    )
-    detect_params = (
-        cv2.aruco.DetectorParameters()
-        if detector_parameters is None
-        else detector_parameters
-    )
+    if charuco_parameters is None:
+        charuco_parameters = default_charuco_parameters()
+    if refine_parameters is None:
+        refine_parameters = default_refine_parameters()
+    if detector_parameters is None:
+        detector_parameters = default_detector_parameters()
 
     charuco_detector = cv2.aruco.CharucoDetector(
         board,
-        charucoParams=charuco_params,
-        refineParams=refine_params,
-        detectorParams=detect_params,
+        charucoParams=charuco_parameters,
+        refineParams=refine_parameters,
+        detectorParams=detector_parameters,
     )
 
     gray = to_gray(img)
@@ -68,8 +90,8 @@ def extract_frames_from_charuco(
             (default off).
         refine_parameters: The refine parameters for charuco detection.
             Leave this default unless you know what you are doing.
-        charuco_parameters: The charuco detection parameters, default otherwise.
-            You can use this to set the minMarkers (default, 2 is recommended) and
+        charuco_parameters: The ChArUco detection parameters, lensboy defaults otherwise.
+            You can use this to set the minMarkers (lensboy default 1) and
             tryRefineMarkers (False by default).
 
     Returns:
@@ -79,6 +101,13 @@ def extract_frames_from_charuco(
     """
     frames: list[Frame] = []
     image_indices: list[int] = []
+
+    if detector_parameters is None:
+        detector_parameters = default_detector_parameters()
+    if refine_parameters is None:
+        refine_parameters = default_refine_parameters()
+    if charuco_parameters is None:
+        charuco_parameters = default_charuco_parameters()
 
     for i, img in enumerate(progress(images, desc="Detecting charuco")):
         frame = _detect_charuco(
