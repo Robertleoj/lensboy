@@ -65,7 +65,16 @@ def _detect_charuco(
     if charuco_ids is None:
         return None
 
-    return Frame(charuco_ids.squeeze(1), charuco_corners.squeeze(1))
+    return _make_frame_from_charuco_detection(charuco_ids, charuco_corners)
+
+
+def _make_frame_from_charuco_detection(
+    charuco_ids: np.ndarray,
+    charuco_corners: np.ndarray,
+) -> Frame:
+    target_point_indices = charuco_ids.reshape(-1)
+    detected_points_in_image = charuco_corners.reshape(-1, 2)
+    return Frame(target_point_indices, detected_points_in_image)
 
 
 def extract_frames_from_charuco(
