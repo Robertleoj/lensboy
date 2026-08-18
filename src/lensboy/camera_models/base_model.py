@@ -30,12 +30,14 @@ class CameraModel(ABC):
 
     @abstractmethod
     def normalize_points(self, pixel_coords: np.ndarray) -> np.ndarray:
-        """Convert pixel coordinates to normalized camera-frame points with z=1.
+        """Convert pixel coordinates to camera-frame bearing vectors.
 
         Args:
             pixel_coords: Shape (N, 2).
 
         Returns:
-            Normalized points in camera frame, shape (N, 3) with z=1.
+            Bearing vectors in camera frame, shape (N, 3). Pinhole-like models
+            may return vectors normalized to z=1; wide-angle models may return
+            unit vectors.
         """
         ...

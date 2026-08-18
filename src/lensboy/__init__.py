@@ -10,6 +10,14 @@ from lensboy.camera_models.base_model import CameraModel, CameraModelConfig
 from lensboy.camera_models.opencv import OpenCV, OpenCVConfig
 from lensboy.camera_models.pinhole_remapped import PinholeRemapped
 from lensboy.camera_models.pinhole_splined import PinholeSplined, PinholeSplinedConfig
+from lensboy.camera_models.stereographic_opencv import (
+    StereographicOpenCV,
+    StereographicOpenCVConfig,
+)
+from lensboy.camera_models.stereographic_splined import (
+    StereographicSplined,
+    StereographicSplinedConfig,
+)
 from lensboy.camera_models.unproject_lut import UnprojectLUT
 from lensboy.common_targets.charuco import extract_frames_from_charuco
 from lensboy.geometry.pose import Pose
@@ -26,6 +34,10 @@ __all__ = [
     "PinholeRemapped",
     "PinholeSplinedConfig",
     "PinholeSplined",
+    "StereographicOpenCV",
+    "StereographicOpenCVConfig",
+    "StereographicSplined",
+    "StereographicSplinedConfig",
     "UnprojectLUT",
     "extract_frames_from_charuco",
     "Pose",

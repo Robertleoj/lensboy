@@ -32,6 +32,32 @@ struct PinholeSplinedIntrinsicsParameters {
     py::array_t<double, py::array::c_style | py::array::forcecast> dy_grid;
 };
 
+struct StereographicOpenCVModelDefinition {
+    uint32_t image_width;
+    uint32_t image_height;
+};
+
+struct StereographicSplinedModelDefinition {
+    uint32_t image_width;
+    uint32_t image_height;
+    double fov_deg_x;
+    double fov_deg_y;
+    uint32_t num_knots_x;
+    uint32_t num_knots_y;
+};
+
+struct StereographicSplinedOptimizationConfig
+    : StereographicSplinedModelDefinition {
+    double smoothness_lambda;
+};
+
+struct StereographicSplinedIntrinsicsParameters {
+    py::array_t<double, py::array::c_style | py::array::forcecast>
+        stereographic_parameters;
+    py::array_t<double, py::array::c_style | py::array::forcecast> dx_grid;
+    py::array_t<double, py::array::c_style | py::array::forcecast> dy_grid;
+};
+
 template <typename T>
 void project_pinhole(
     const T* const intrinsics,
@@ -187,6 +213,85 @@ static inline void normalized_to_stereographic(
     const T scale = T(2) * tan(theta / T(2)) / r;
     x_stereo = x_normalized * scale;
     y_stereo = y_normalized * scale;
+}
+
+template <typename T>
+static inline void unit_ray_to_stereographic(
+    const Vec3<T>& ray,
+    T& x_stereo,
+    T& y_stereo
+) {
+    const T denom = T(1.0) + ray[2];
+    x_stereo = T(2.0) * ray[0] / denom;
+    y_stereo = T(2.0) * ray[1] / denom;
+}
+
+template <typename T>
+static inline Vec3<T> stereographic_to_unit_ray(
+    const T& x_stereo,
+    const T& y_stereo
+) {
+    const T r2 = x_stereo * x_stereo + y_stereo * y_stereo;
+    const T denom = T(4.0) + r2;
+    return Vec3<T>(
+        T(4.0) * x_stereo / denom,
+        T(4.0) * y_stereo / denom,
+        (T(4.0) - r2) / denom
+    );
+}
+
+template <typename T>
+static inline Vec3<T> normalize_to_unit_ray(
+    const Vec3<T>& point
+) {
+    using std::sqrt;
+    const T norm = sqrt(point[0] * point[0] + point[1] * point[1] +
+                        point[2] * point[2]);
+    return point / norm;
+}
+
+template <typename T>
+static inline T stereographic_opencv_radial_radius(
+    const T& theta,
+    const T* const coeffs,
+    int n_coeffs
+) {
+    using std::tan;
+
+    const T stereo_radius = T(2.0) * tan(theta / T(2.0));
+    T scale = T(1.0);
+    T radius_power = stereo_radius * stereo_radius;
+    const T radius2 = radius_power;
+    for (int i = 0; i < n_coeffs; i++) {
+        scale += coeffs[i] * radius_power;
+        radius_power *= radius2;
+    }
+    return stereo_radius * scale;
+}
+
+template <typename T>
+static inline T stereographic_opencv_radial_radius_derivative(
+    const T& theta,
+    const T* const coeffs,
+    int n_coeffs
+) {
+    using std::cos;
+
+    const T c = cos(theta / T(2.0));
+    const T stereo_radius = T(2.0) * tan(theta / T(2.0));
+    const T dstereo_dtheta = T(1.0) / (c * c);
+    T scale = T(1.0);
+    T dscale_dstereo = T(0.0);
+    T radius_power = stereo_radius * stereo_radius;
+    T derivative_power = stereo_radius;
+    const T radius2 = radius_power;
+    for (int i = 0; i < n_coeffs; i++) {
+        scale += coeffs[i] * radius_power;
+        dscale_dstereo += T(2 * i + 2) * coeffs[i] * derivative_power;
+        radius_power *= radius2;
+        derivative_power *= radius2;
+    }
+    return dstereo_dtheta * (scale + stereo_radius * dscale_dstereo);
 }
 
 // Compute stereographic half-range from FOV in radians.
@@ -406,6 +511,165 @@ struct SplineMap {
         }
     }
 };
+
+struct StereographicSplineMap {
+    int Nx = 0;
+    int Ny = 0;
+    double half_x = 0.0;
+    double half_y = 0.0;
+    double x_scale = 0.0;
+    double y_scale = 0.0;
+
+    explicit StereographicSplineMap(
+        const StereographicSplinedModelDefinition& cfg
+    ) {
+        this->Nx = static_cast<int>(cfg.num_knots_x);
+        this->Ny = static_cast<int>(cfg.num_knots_y);
+
+        const double fov_rad_x = cfg.fov_deg_x * M_PI / 180.0;
+        const double fov_rad_y = cfg.fov_deg_y * M_PI / 180.0;
+        this->half_x = stereo_half_range(fov_rad_x);
+        this->half_y = stereo_half_range(fov_rad_y);
+
+        this->x_scale = (Nx - 3) / (2.0 * this->half_x);
+        this->y_scale = (Ny - 3) / (2.0 * this->half_y);
+    }
+
+    template <typename T>
+    inline void stereo_to_grid_coords(
+        const T& x_stereo,
+        const T& y_stereo,
+        T& gx,
+        T& gy
+    ) const {
+        const T x_s_raw =
+            T(1.0) + (x_stereo + T(this->half_x)) * T(this->x_scale);
+        const T y_s_raw =
+            T(1.0) + (y_stereo + T(this->half_y)) * T(this->y_scale);
+
+        constexpr double eps = 1e-12;
+        gx = clamp_T(x_s_raw, T(0.0), T(Nx - 1.0 - eps));
+        gy = clamp_T(y_s_raw, T(0.0), T(Ny - 1.0 - eps));
+    }
+
+    inline void project_to_spline_coords(
+        const double* cam6,
+        const Vec3<double>& pw,
+        double& gx,
+        double& gy,
+        double& x_stereo,
+        double& y_stereo
+    ) const {
+        double pc[3];
+        ceres::AngleAxisRotatePoint(cam6, pw.data(), pc);
+        pc[0] += cam6[3];
+        pc[1] += cam6[4];
+        pc[2] += cam6[5];
+
+        const Vec3<double> ray =
+            normalize_to_unit_ray(Vec3<double>(pc[0], pc[1], pc[2]));
+        unit_ray_to_stereographic(ray, x_stereo, y_stereo);
+        stereo_to_grid_coords(x_stereo, y_stereo, gx, gy);
+    }
+
+    inline void cell_index(
+        const double* cam6,
+        const Vec3<double>& pw,
+        int& ix,
+        int& iy
+    ) const {
+        double gx, gy, sx, sy;
+        project_to_spline_coords(cam6, pw, gx, gy, sx, sy);
+        ix = static_cast<int>(gx);
+        iy = static_cast<int>(gy);
+    }
+
+    inline bool is_inside_fov(
+        int ix,
+        int iy
+    ) const {
+        return ix >= 1 && ix <= Nx - 3 && iy >= 1 && iy <= Ny - 3;
+    }
+
+    inline void support_indices_4x4(
+        int ix,
+        int iy,
+        std::array<int, 16>& flat
+    ) const {
+        int idx = 0;
+        for (int b = 0; b < 4; b++) {
+            const int yy = clamp_int(iy + b - 1, 0, Ny - 1);
+            for (int a = 0; a < 4; a++) {
+                const int xx = clamp_int(ix + a - 1, 0, Nx - 1);
+                flat[idx++] = yy * Nx + xx;
+            }
+        }
+    }
+};
+
+template <typename T>
+void project_stereographic_opencv(
+    const T* const intrinsics,  // fx, fy, cx, cy, OpenCV distortion coeffs
+    const Vec3<T>& point_in_camera,
+    Vec2<T>& result
+) {
+    const Vec3<T> ray = normalize_to_unit_ray(point_in_camera);
+    T x_stereo, y_stereo;
+    unit_ray_to_stereographic(ray, x_stereo, y_stereo);
+
+    Vec2<T> distorted_stereo;
+    distort_opencv(intrinsics + 4, Vec2<T>(x_stereo, y_stereo), distorted_stereo);
+
+    const T fx = intrinsics[0];
+    const T fy = intrinsics[1];
+    const T cx = intrinsics[2];
+    const T cy = intrinsics[3];
+
+    result[0] = fx * distorted_stereo[0] + cx;
+    result[1] = fy * distorted_stereo[1] + cy;
+}
+
+template <typename T>
+void project_stereographic_splined(
+    StereographicSplinedModelDefinition* config,
+    const T* const stereographic_parameters,  // fx, fy, cx, cy
+    const T* const dx_grid,
+    const T* const dy_grid,
+    const Vec3<T>& point_in_camera,
+    Vec2<T>& result
+) {
+    const Vec3<T> ray = normalize_to_unit_ray(point_in_camera);
+    T x_stereo, y_stereo;
+    unit_ray_to_stereographic(ray, x_stereo, y_stereo);
+
+    const StereographicSplineMap map(*config);
+
+    T x_spline, y_spline;
+    map.stereo_to_grid_coords(x_stereo, y_stereo, x_spline, y_spline);
+
+    const T dx = eval_bspline2d_uniform_cubic_clamped(
+        dx_grid,
+        map.Nx,
+        map.Ny,
+        x_spline,
+        y_spline
+    );
+    const T dy = eval_bspline2d_uniform_cubic_clamped(
+        dy_grid,
+        map.Nx,
+        map.Ny,
+        x_spline,
+        y_spline
+    );
+
+    const T fx = stereographic_parameters[0];
+    const T fy = stereographic_parameters[1];
+    const T cx = stereographic_parameters[2];
+    const T cy = stereographic_parameters[3];
+
+    result[0] = fx * (x_stereo + dx) + cx;
+    result[1] = fy * (y_stereo + dy) + cy;
+}
 
 template <typename T>
 void project_pinhole_splined(

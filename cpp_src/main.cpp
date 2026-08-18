@@ -193,6 +193,150 @@ PYBIND11_MODULE(
             }
         );
 
+    py::class_<lensboy::StereographicOpenCVModelDefinition>(
+        m,
+        "StereographicOpenCVModelDefinition"
+    )
+        .def(
+            py::init<uint32_t, uint32_t>(),
+            py::arg("image_width"),
+            py::arg("image_height")
+        )
+        .def_readwrite(
+            "image_width",
+            &lensboy::StereographicOpenCVModelDefinition::image_width
+        )
+        .def_readwrite(
+            "image_height",
+            &lensboy::StereographicOpenCVModelDefinition::image_height
+        );
+
+    py::class_<lensboy::StereographicSplinedModelDefinition>(
+        m,
+        "StereographicSplinedModelDefinition"
+    )
+        .def(
+            py::init<uint32_t, uint32_t, double, double, uint32_t, uint32_t>(),
+            py::arg("image_width"),
+            py::arg("image_height"),
+            py::arg("fov_deg_x"),
+            py::arg("fov_deg_y"),
+            py::arg("num_knots_x"),
+            py::arg("num_knots_y")
+        )
+        .def_readwrite(
+            "image_width",
+            &lensboy::StereographicSplinedModelDefinition::image_width
+        )
+        .def_readwrite(
+            "image_height",
+            &lensboy::StereographicSplinedModelDefinition::image_height
+        )
+        .def_readwrite(
+            "fov_deg_x",
+            &lensboy::StereographicSplinedModelDefinition::fov_deg_x
+        )
+        .def_readwrite(
+            "fov_deg_y",
+            &lensboy::StereographicSplinedModelDefinition::fov_deg_y
+        )
+        .def_readwrite(
+            "num_knots_x",
+            &lensboy::StereographicSplinedModelDefinition::num_knots_x
+        )
+        .def_readwrite(
+            "num_knots_y",
+            &lensboy::StereographicSplinedModelDefinition::num_knots_y
+        );
+
+    py::class_<
+        lensboy::StereographicSplinedOptimizationConfig,
+        lensboy::StereographicSplinedModelDefinition>(
+        m,
+        "StereographicSplinedOptimizationConfig"
+    )
+        .def(
+            py::init([](uint32_t image_width,
+                        uint32_t image_height,
+                        double fov_deg_x,
+                        double fov_deg_y,
+                        uint32_t num_knots_x,
+                        uint32_t num_knots_y,
+                        double smoothness_lambda) {
+                lensboy::StereographicSplinedOptimizationConfig config;
+                config.image_width = image_width;
+                config.image_height = image_height;
+                config.fov_deg_x = fov_deg_x;
+                config.fov_deg_y = fov_deg_y;
+                config.num_knots_x = num_knots_x;
+                config.num_knots_y = num_knots_y;
+                config.smoothness_lambda = smoothness_lambda;
+                return config;
+            }),
+            py::arg("image_width"),
+            py::arg("image_height"),
+            py::arg("fov_deg_x"),
+            py::arg("fov_deg_y"),
+            py::arg("num_knots_x"),
+            py::arg("num_knots_y"),
+            py::arg("smoothness_lambda")
+        )
+        .def_readwrite(
+            "smoothness_lambda",
+            &lensboy::StereographicSplinedOptimizationConfig::smoothness_lambda
+        );
+
+    py::class_<lensboy::StereographicSplinedIntrinsicsParameters>(
+        m,
+        "StereographicSplinedIntrinsicsParameters"
+    )
+        .def(
+            py::init([](py::array_t<double> stereographic_parameters,
+                        py::array_t<double> dx_grid,
+                        py::array_t<double> dy_grid) {
+                using A = py::
+                    array_t<double, py::array::c_style | py::array::forcecast>;
+                auto params_ = A(stereographic_parameters);
+                auto dx_ = A(dx_grid);
+                auto dy_ = A(dy_grid);
+
+                auto params_buf = params_.request();
+                if (params_buf.ndim != 1 || params_buf.shape[0] != 4) {
+                    throw py::value_error(
+                        "stereographic_parameters must have shape (4,)"
+                    );
+                }
+                if (dx_.request().ndim != 2) {
+                    throw py::value_error("dx_grid must be a 2D array");
+                }
+                if (dy_.request().ndim != 2) {
+                    throw py::value_error("dy_grid must be a 2D array");
+                }
+
+                return lensboy::StereographicSplinedIntrinsicsParameters{
+                    params_,
+                    dx_,
+                    dy_
+                };
+            }),
+            py::arg("stereographic_parameters"),
+            py::arg("dx_grid"),
+            py::arg("dy_grid")
+        )
+        .def_readwrite(
+            "stereographic_parameters",
+            &lensboy::StereographicSplinedIntrinsicsParameters::
+                stereographic_parameters
+        )
+        .def_readwrite(
+            "dx_grid",
+            &lensboy::StereographicSplinedIntrinsicsParameters::dx_grid
+        )
+        .def_readwrite(
+            "dy_grid",
+            &lensboy::StereographicSplinedIntrinsicsParameters::dy_grid
+        );
+
     py::class_<lensboy::WarpCoordinates>(m, "WarpCoordinates")
         .def(
             py::init<lensboy::Vec6<double>, double, double>(),
@@ -238,6 +382,19 @@ PYBIND11_MODULE(
     );
 
     m.def(
+        "calibrate_stereographic_opencv",
+        &lensboy::calibrate_stereographic_opencv,
+        py::arg("intrinsics_initial_value"),
+        py::arg("intrinsics_param_optimize_mask"),
+        py::arg("cameras_from_target"),
+        py::arg("target_points"),
+        py::arg("frames"),
+        py::arg("warp_coordinates") = py::none(),
+        py::arg("warp_coeffs_initial") =
+            std::array<double, 5>{0.0, 0.0, 0.0, 0.0, 0.0}
+    );
+
+    m.def(
         "get_matching_spline_distortion_model",
         &lensboy::get_matching_spline_distortion_model,
         py::arg("opencv_distortion_params"),
@@ -269,11 +426,56 @@ PYBIND11_MODULE(
     );
 
     m.def(
+        "fine_tune_stereographic_splined",
+        &lensboy::fine_tune_stereographic_splined,
+        py::arg("model_config"),
+        py::arg("intrinsics_parameters"),
+        py::arg("cameras_from_target"),
+        py::arg("target_points"),
+        py::arg("frames"),
+        py::arg("warp_coordinates") = py::none(),
+        py::arg("warp_coeffs_initial") =
+            std::array<double, 5>{0.0, 0.0, 0.0, 0.0, 0.0}
+    );
+
+    m.def(
         "project_pinhole_splined_points",
         &lensboy::project_pinhole_splined_pywrapper,
         py::arg("model_config"),
         py::arg("intrinsics"),
         py::arg("points_in_camera")
+    );
+
+    m.def(
+        "project_stereographic_opencv_points",
+        &lensboy::project_stereographic_opencv_pywrapper,
+        py::arg("model_config"),
+        py::arg("intrinsics"),
+        py::arg("points_in_camera")
+    );
+
+    m.def(
+        "normalize_stereographic_opencv_points",
+        &lensboy::normalize_stereographic_opencv_points,
+        py::arg("model_config"),
+        py::arg("intrinsics"),
+        py::arg("pixel_coords")
+    );
+
+    m.def(
+        "project_stereographic_splined_points",
+        &lensboy::project_stereographic_splined_pywrapper,
+        py::arg("model_config"),
+        py::arg("intrinsics"),
+        py::arg("points_in_camera")
+    );
+
+    m.def(
+        "normalize_stereographic_splined_points",
+        &lensboy::normalize_stereographic_splined_points,
+        py::arg("model_config"),
+        py::arg("intrinsics"),
+        py::arg("pixel_coords")
     );
 
     m.def(

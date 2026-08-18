@@ -24,6 +24,14 @@ from lensboy.camera_models.pinhole_splined import (
     PinholeSplined,
     PinholeSplinedConfig,
 )
+from lensboy.camera_models.stereographic_opencv import (
+    StereographicOpenCV,
+    StereographicOpenCVConfig,
+)
+from lensboy.camera_models.stereographic_splined import (
+    StereographicSplined,
+    StereographicSplinedConfig,
+)
 from lensboy.geometry.pose import Pose
 
 DEFAULT_OUTLIER_THRESHOLD = 5.0
@@ -53,7 +61,7 @@ def _project_and_calculate_residuals(
     target_points: np.ndarray,
     camera_from_target: Pose,
     frame: Frame,
-    model: OpenCV | PinholeSplined,
+    model: OpenCV | PinholeSplined | StereographicOpenCV | StereographicSplined,
     target_warp: TargetWarp | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     point_indices = frame.target_point_indices
@@ -164,8 +172,54 @@ def _opencv_calibrate_inner(
     )
 
 
+def _stereographic_opencv_calibrate_inner(
+    batch: _OptimizationBatch[StereographicOpenCV],
+    config: StereographicOpenCVConfig,
+    target_points: np.ndarray,
+    warp_coordinates: WarpCoordinates | None = None,
+) -> _OptimizationBatch[StereographicOpenCV]:
+    params = batch.intrinsics._params()
+    mask = config.optimize_mask()
+    warp_coordinates_cpp = None
+    if warp_coordinates is not None:
+        warp_coordinates_cpp = warp_coordinates._to_cpp()
+    warp_coeffs_initial = [0.0] * 5
+    if batch.warp_coeffs is not None:
+        warp_coeffs_initial = list(batch.warp_coeffs)
+
+    result = lbb.calibrate_stereographic_opencv(
+        intrinsics_initial_value=params,
+        intrinsics_param_optimize_mask=mask.tolist(),
+        cameras_from_target=[p._to_cpp() for p in batch.cameras_from_target],
+        target_points=list(target_points),
+        frames=[f._to_cpp() for f in batch.frames],
+        warp_coordinates=warp_coordinates_cpp,
+        warp_coeffs_initial=warp_coeffs_initial,
+    )
+
+    out_coeffs: tuple[float, float, float, float, float] | None = None
+    if warp_coordinates is not None:
+        arr = np.array(result["warp_coeffs"])
+        out_coeffs = (
+            float(arr[0]),
+            float(arr[1]),
+            float(arr[2]),
+            float(arr[3]),
+            float(arr[4]),
+        )
+
+    return _OptimizationBatch(
+        intrinsics=batch.intrinsics._with_params(result["intrinsics"]),
+        cameras_from_target=[
+            Pose._from_cpp(np.array(a)) for a in result["cameras_from_target"]
+        ],
+        frames=batch.frames,
+        warp_coeffs=out_coeffs,
+    )
+
+
 def _compute_frame_diagnostics(
-    intrinsics: OpenCV | PinholeSplined,
+    intrinsics: OpenCV | PinholeSplined | StereographicOpenCV | StereographicSplined,
     cameras_from_target: list[Pose | None],
     frames: list[Frame],
     target_points: np.ndarray,
@@ -545,7 +599,7 @@ def _matching_opencv_model_from_stereographic(
 
 
 def _solve_pnp_all_frames_with_model(
-    model: OpenCV | PinholeSplined,
+    model: OpenCV | PinholeSplined | StereographicOpenCV | StereographicSplined,
     target_points: np.ndarray,
     frames: list[Frame],
 ) -> tuple[list[Pose], list[bool], float]:
@@ -575,8 +629,9 @@ def _solve_pnp_all_frames_with_model(
         normalized_points_in_camera = model.normalize_points(
             frame.detected_points_in_image
         )
+        z = normalized_points_in_camera[:, 2:3]
         normalized_xy = np.ascontiguousarray(
-            normalized_points_in_camera[:, :2],
+            normalized_points_in_camera[:, :2] / z,
             dtype=np.float64,
         )
 
@@ -686,6 +741,90 @@ def _get_initial_state_with_pnp(
 
     intrinsics = _matching_opencv_model_from_stereographic(config, best_focal)
     return intrinsics, best_poses, best_solved
+
+
+def _get_initial_state_with_pnp_stereographic_opencv(
+    config: StereographicOpenCVConfig,
+    target_points: np.ndarray,
+    frames: list[Frame],
+    initial_camera_model: StereographicOpenCV | None = None,
+) -> tuple[StereographicOpenCV, list[Pose], list[bool]]:
+    """Estimate initial Stereographic OpenCV intrinsics and poses using stereographic PnP.
+
+    Args:
+        config: Camera model configuration.
+        target_points: Calibration target 3D points, shape (N, 3).
+        frames: Detected calibration frames.
+        initial_camera_model: Optional initial intrinsics to optimize from.
+
+    Returns:
+        Tuple of (initial intrinsics, poses, solved mask).
+    """
+    if initial_camera_model is not None:
+        cameras_from_target, solved, _ = _solve_pnp_all_frames_with_model(
+            initial_camera_model,
+            target_points,
+            frames,
+        )
+        return initial_camera_model, cameras_from_target, solved
+
+    cx = config.image_width / 2.0
+    cy = config.image_height / 2.0
+
+    if config.initial_focal_length is not None:
+        focal_length = float(config.initial_focal_length)
+        poses, solved, _ = _solve_pnp_all_frames_stereographic(
+            focal_length,
+            target_points,
+            frames,
+            cx,
+            cy,
+        )
+        model = StereographicOpenCV(
+            image_height=config.image_height,
+            image_width=config.image_width,
+            fx=focal_length,
+            fy=focal_length,
+            cx=cx,
+            cy=cy,
+            distortion_coeffs=np.zeros(14, dtype=np.float64),
+        )
+        return model, poses, solved
+
+    max_dim = max(config.image_width, config.image_height)
+    candidates = np.geomspace(0.2 * max_dim, 5.0 * max_dim, num=30)
+
+    best_focal = float(candidates[0])
+    best_error = float("inf")
+    best_poses: list[Pose] = []
+    best_solved: list[bool] = []
+
+    for f in candidates:
+        poses, solved, error = _solve_pnp_all_frames_stereographic(
+            float(f),
+            target_points,
+            frames,
+            cx,
+            cy,
+        )
+        if error < best_error:
+            best_error = error
+            best_focal = float(f)
+            best_poses = poses
+            best_solved = solved
+
+    log(f"Auto-estimated initial stereographic focal length: {best_focal:.1f} px")
+
+    model = StereographicOpenCV(
+        image_height=config.image_height,
+        image_width=config.image_width,
+        fx=best_focal,
+        fy=best_focal,
+        cx=cx,
+        cy=cy,
+        distortion_coeffs=np.zeros(14, dtype=np.float64),
+    )
+    return model, best_poses, best_solved
 
 
 _PLANARITY_RATIO_THRESHOLD = 0.1
@@ -915,6 +1054,97 @@ def _opencv_calibrate(
     )
 
 
+def _calibrate_stereographic_opencv(
+    target_points: np.ndarray,
+    frames: list[Frame],
+    config: StereographicOpenCVConfig,
+    outlier_threshold_stddevs: float | None,
+    estimate_target_warp: bool,
+    initial_camera_model: StereographicOpenCV | None = None,
+) -> CalibrationResult[StereographicOpenCV]:
+    assert target_points.ndim == 2 and target_points.shape[1] == 3, (
+        f"Expected (N, 3) target_points, got {target_points.shape}"
+    )
+    assert np.issubdtype(target_points.dtype, np.floating), (
+        f"Expected floating dtype for target_points, got {target_points.dtype}"
+    )
+    log("Computing initial poses with stereographic PnP...")
+    initial_intrinsics, initial_poses, pnp_solved = (
+        _get_initial_state_with_pnp_stereographic_opencv(
+            config,
+            target_points,
+            frames,
+            initial_camera_model,
+        )
+    )
+
+    n_solved = sum(pnp_solved)
+    n_failed = len(frames) - n_solved
+    log(f"PnP solved {n_solved}/{len(frames)} frames")
+    if n_failed > 0:
+        log(f"{n_failed} frame(s) failed PnP, excluding from optimization")
+
+    poses: list[Pose | None] = []
+    inlier_masks: list[np.ndarray | None] = []
+    for frame, camera_from_target, ok in zip(frames, initial_poses, pnp_solved):
+        if ok:
+            poses.append(camera_from_target)
+            inlier_masks.append(np.ones(len(frame), dtype=bool))
+            continue
+        poses.append(None)
+        inlier_masks.append(None)
+
+    warp_coordinates = None
+    if estimate_target_warp:
+        warp_coordinates = _make_warp_coordinates(target_points)
+
+    def optimize_fn(
+        batch: _OptimizationBatch[StereographicOpenCV],
+    ) -> _OptimizationBatch[StereographicOpenCV]:
+        return _stereographic_opencv_calibrate_inner(
+            batch,
+            config,
+            target_points,
+            warp_coordinates,
+        )
+
+    state = _run_with_outlier_filtering(
+        optimize_fn,
+        _OptimizationState(initial_intrinsics, poses, frames, None, inlier_masks),
+        target_points,
+        outlier_threshold_stddevs,
+        warp_coordinates=warp_coordinates,
+        label="Stereographic OpenCV",
+    )
+
+    target_warp = None
+    if warp_coordinates is not None and state.warp_coeffs is not None:
+        target_warp = TargetWarp(
+            warp_coordinates=warp_coordinates,
+            object_warp=state.warp_coeffs,
+        )
+        deflection = target_warp.max_deflection(target_points)
+        log(f"Target warp max deflection: {deflection:.4f} (target units)")
+
+    diagnostics = _compute_frame_diagnostics(
+        state.intrinsics,
+        state.cameras_from_target,
+        state.frames,
+        target_points,
+        inlier_masks=state.inlier_masks,
+        target_warp=target_warp,
+    )
+
+    return CalibrationResult(
+        camera_model=state.intrinsics,
+        cameras_from_target=state.cameras_from_target,
+        frame_diagnostics=diagnostics,
+        frames=list(frames),
+        target_points=target_points,
+        target_warp=target_warp,
+    )
+
+
 def _pinhole_splined_refine_inner(
     batch: _OptimizationBatch[PinholeSplined],
     config: PinholeSplinedConfig,
@@ -930,6 +1160,57 @@ def _pinhole_splined_refine_inner(
 
     fine_tune_result = lbb.fine_tune_pinhole_splined(
         model_config=_pinhole_splined_cpp_optimization_config(batch.intrinsics, config),
+        intrinsics_parameters=batch.intrinsics._cpp_params(),
+        cameras_from_target=[pose._to_cpp() for pose in batch.cameras_from_target],
+        target_points=list(target_points),
+        frames=[f._to_cpp() for f in batch.frames],
+        warp_coordinates=warp_coordinates_cpp,
+        warp_coeffs_initial=warp_coeffs_initial,
+    )
+
+    out_coeffs: tuple[float, float, float, float, float] | None = None
+    if warp_coordinates is not None:
+        arr = np.array(fine_tune_result["warp_coeffs"])
+        out_coeffs = (
+            float(arr[0]),
+            float(arr[1]),
+            float(arr[2]),
+            float(arr[3]),
+            float(arr[4]),
+        )
+
+    return _OptimizationBatch(
+        intrinsics=replace(
+            batch.intrinsics,
+            dx_grid=fine_tune_result["dx_grid"],
+            dy_grid=fine_tune_result["dy_grid"],
+        ),
+        cameras_from_target=[
+            Pose._from_cpp(np.array(a)) for a in fine_tune_result["cameras_from_target"]
+        ],
+        frames=batch.frames,
+        warp_coeffs=out_coeffs,
+    )
+
+
+def _stereographic_splined_refine_inner(
+    batch: _OptimizationBatch[StereographicSplined],
+    config: StereographicSplinedConfig,
+    target_points: np.ndarray,
+    warp_coordinates: WarpCoordinates | None,
+) -> _OptimizationBatch[StereographicSplined]:
+    warp_coordinates_cpp = None
+    if warp_coordinates is not None:
+        warp_coordinates_cpp = warp_coordinates._to_cpp()
+    warp_coeffs_initial = [0.0] * 5
+    if batch.warp_coeffs is not None:
+        warp_coeffs_initial = list(batch.warp_coeffs)
+
+    fine_tune_result = lbb.fine_tune_stereographic_splined(
+        model_config=_stereographic_splined_cpp_optimization_config(
+            batch.intrinsics,
+            config,
+        ),
         intrinsics_parameters=batch.intrinsics._cpp_params(),
         cameras_from_target=[pose._to_cpp() for pose in batch.cameras_from_target],
         target_points=list(target_points),
@@ -998,6 +1279,30 @@ def _pinhole_splined_cpp_optimization_config(
         C++ spline config for the optimizer.
     """
     return lbb.PinholeSplinedOptimizationConfig(
+        config.image_width,
+        config.image_height,
+        model.fov_deg_x,
+        model.fov_deg_y,
+        config.num_knots_x,
+        config.num_knots_y,
+        config.smoothness_lambda,
+    )
+
+
+def _stereographic_splined_cpp_optimization_config(
+    model: StereographicSplined,
+    config: StereographicSplinedConfig,
+) -> lbb.StereographicSplinedOptimizationConfig:
+    """Build the C++ stereographic spline optimizer config.
+
+    Args:
+        model: Camera model providing the fitted FOV.
+        config: Calibration config providing optimizer settings.
+
+    Returns:
+        C++ spline config for the optimizer.
+    """
+    return lbb.StereographicSplinedOptimizationConfig(
         config.image_width,
         config.image_height,
         model.fov_deg_x,
@@ -1095,6 +1400,43 @@ def _compute_fov_from_spline_model(
     fov_y = float(np.degrees(2 * np.arctan(half_y * (1 + padding_fraction))))
 
     return (min(fov_x, max_fov_deg), min(fov_y, max_fov_deg))
+
+
+def _compute_fov_from_unit_ray_model(
+    model: StereographicOpenCV | StereographicSplined,
+    padding_fraction: float = 0.05,
+    max_fov_deg: float = 220.0,
+) -> tuple[float, float]:
+    """Compute FOV by unprojecting the image border through a unit-ray model.
+
+    Args:
+        model: Fitted stereographic camera model.
+        padding_fraction: Fractional padding to add to each FOV axis.
+        max_fov_deg: Maximum allowed FOV.
+
+    Returns:
+        Padded (fov_deg_x, fov_deg_y), capped at max_fov_deg.
+    """
+    w, h = float(model.image_width), float(model.image_height)
+    n = 80
+    t = np.linspace(0, 1, n)
+    edges = np.concatenate(
+        [
+            np.column_stack([t * w, np.zeros(n)]),
+            np.column_stack([t * w, np.full(n, h)]),
+            np.column_stack([np.zeros(n), t * h]),
+            np.column_stack([np.full(n, w), t * h]),
+        ]
+    )
+    rays = model.normalize_points(edges)
+    angles_x = np.arctan2(rays[:, 0], rays[:, 2])
+    angles_y = np.arctan2(rays[:, 1], rays[:, 2])
+    fov_x = float(np.degrees(np.max(angles_x) - np.min(angles_x)))
+    fov_y = float(np.degrees(np.max(angles_y) - np.min(angles_y)))
+    return (
+        min(fov_x * (1 + padding_fraction), max_fov_deg),
+        min(fov_y * (1 + padding_fraction), max_fov_deg),
+    )
 
 
 def _fit_opencv_seed(
@@ -1301,6 +1643,57 @@ def _build_initial_spline_model(
     )
 
 
+def _build_initial_stereographic_spline_model(
+    seed_model: StereographicOpenCV,
+    config: StereographicSplinedConfig,
+    fov_deg_x: float,
+    fov_deg_y: float,
+) -> StereographicSplined:
+    """Build the initial stereographic spline model from a Stereographic OpenCV seed.
+
+    Args:
+        seed_model: Seed stereographic model.
+        config: Spline config.
+        fov_deg_x: Target FOV in x for the spline grid.
+        fov_deg_y: Target FOV in y for the spline grid.
+
+    Returns:
+        Initial StereographicSplined model with zero spline correction.
+    """
+    half_x = 2.0 * np.tan(np.deg2rad(fov_deg_x) / 4.0)
+    half_y = 2.0 * np.tan(np.deg2rad(fov_deg_y) / 4.0)
+    xs = np.linspace(-half_x, half_x, config.num_knots_x)
+    ys = np.linspace(-half_y, half_y, config.num_knots_y)
+    sx, sy = np.meshgrid(xs, ys)
+    radius2 = sx * sx + sy * sy
+    denom = 4.0 + radius2
+    rays = np.column_stack(
+        [
+            (4.0 * sx / denom).ravel(),
+            (4.0 * sy / denom).ravel(),
+            ((4.0 - radius2) / denom).ravel(),
+        ]
+    )
+    seed_pixels = seed_model.project_points(rays)
+    seed_sx = ((seed_pixels[:, 0] - seed_model.cx) / seed_model.fx).reshape(sx.shape)
+    seed_sy = ((seed_pixels[:, 1] - seed_model.cy) / seed_model.fy).reshape(sy.shape)
+
+    return StereographicSplined(
+        image_height=config.image_height,
+        image_width=config.image_width,
+        fx=seed_model.fx,
+        fy=seed_model.fy,
+        cx=seed_model.cx,
+        cy=seed_model.cy,
+        dx_grid=np.asarray(seed_sx - sx, dtype=np.float64),
+        dy_grid=np.asarray(seed_sy - sy, dtype=np.float64),
+        num_knots_x=config.num_knots_x,
+        num_knots_y=config.num_knots_y,
+        fov_deg_x=fov_deg_x,
+        fov_deg_y=fov_deg_y,
+    )
+
+
 def _calibrate_pinhole_splined(
     target_points: np.ndarray,
     frames: list[Frame],
@@ -1429,6 +1822,137 @@ def _calibrate_pinhole_splined(
     )
 
 
+def _calibrate_stereographic_splined(
+    target_points: np.ndarray,
+    frames: list[Frame],
+    config: StereographicSplinedConfig,
+    outlier_threshold_stddevs: float | None,
+    estimate_target_warp: bool,
+    initial_camera_model: StereographicSplined | None = None,
+) -> CalibrationResult[StereographicSplined]:
+    assert target_points.ndim == 2 and target_points.shape[1] == 3, (
+        f"Expected (N, 3) target_points, got {target_points.shape}"
+    )
+    assert np.issubdtype(target_points.dtype, np.floating), (
+        f"Expected floating dtype for target_points, got {target_points.dtype}"
+    )
+
+    if initial_camera_model is None:
+        seed_config = StereographicOpenCVConfig(
+            image_height=config.image_height,
+            image_width=config.image_width,
+            initial_focal_length=config.initial_focal_length,
+            included_distortion_coefficients=StereographicOpenCVConfig.FULL_14,
+        )
+        seed_result = _calibrate_stereographic_opencv(
+            target_points,
+            frames,
+            seed_config,
+            outlier_threshold_stddevs,
+            estimate_target_warp,
+        )
+        seed_model = seed_result.camera_model
+        if config.fov_deg_xy is not None:
+            fov_deg_x, fov_deg_y = config.fov_deg_xy
+            log(
+                f"Stereographic spline FOV (user-specified): "
+                f"{fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
+            )
+        else:
+            fov_deg_x, fov_deg_y = _compute_fov_from_unit_ray_model(
+                seed_model,
+                padding_fraction=0.05,
+            )
+            log(
+                f"Stereographic spline FOV estimate: "
+                f"{fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
+            )
+        model = _build_initial_stereographic_spline_model(
+            seed_model,
+            config,
+            fov_deg_x,
+            fov_deg_y,
+        )
+        poses = list(seed_result.cameras_from_target)
+        inlier_masks = []
+        for frame_diagnostics in seed_result.frame_diagnostics:
+            if frame_diagnostics is None:
+                inlier_masks.append(None)
+                continue
+            inlier_masks.append(frame_diagnostics.inlier_mask)
+        warp_coordinates = None
+        warp_coeffs = None
+        if seed_result.target_warp is not None:
+            warp_coordinates = seed_result.target_warp.warp_coordinates
+            warp_coeffs = seed_result.target_warp.object_warp
+    else:
+        model = initial_camera_model
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            model,
+            target_points,
+            frames,
+        )
+        poses = []
+        inlier_masks = []
+        for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
+            if ok:
+                poses.append(camera_from_target)
+                inlier_masks.append(np.ones(len(frame), dtype=bool))
+                continue
+            poses.append(None)
+            inlier_masks.append(None)
+        warp_coordinates = None
+        if estimate_target_warp:
+            warp_coordinates = _make_warp_coordinates(target_points)
+        warp_coeffs = None
+
+    def optimize_fn(
+        batch: _OptimizationBatch[StereographicSplined],
+    ) -> _OptimizationBatch[StereographicSplined]:
+        return _stereographic_splined_refine_inner(
+            batch,
+            config,
+            target_points,
+            warp_coordinates,
+        )
+
+    state = _run_with_outlier_filtering(
+        optimize_fn,
+        _OptimizationState(model, poses, frames, warp_coeffs, inlier_masks),
+        target_points,
+        outlier_threshold_stddevs,
+        warp_coordinates=warp_coordinates,
+        label="Stereographic spline",
+    )
+
+    target_warp = None
+    if warp_coordinates is not None and state.warp_coeffs is not None:
+        target_warp = TargetWarp(
+            warp_coordinates=warp_coordinates,
+            object_warp=state.warp_coeffs,
+        )
+        deflection = target_warp.max_deflection(target_points)
+        log(f"Target warp max deflection: {deflection:.4f} (target units)")
+
+    diagnostics = _compute_frame_diagnostics(
+        state.intrinsics,
+        state.cameras_from_target,
+        frames,
+        target_points,
+        inlier_masks=state.inlier_masks,
+        target_warp=target_warp,
+    )
+
+    return CalibrationResult(
+        camera_model=state.intrinsics,
+        cameras_from_target=state.cameras_from_target,
+        frame_diagnostics=diagnostics,
+        frames=list(frames),
+        target_points=target_points,
+        target_warp=target_warp,
+    )
+
+
 def _validate_opencv_initial_model_config(
     config: OpenCVConfig,
     initial_camera_model: OpenCV,
@@ -1519,6 +2043,94 @@ def _validate_spline_initial_model_config(
         )
 
 
+def _validate_stereographic_opencv_initial_model_config(
+    config: StereographicOpenCVConfig,
+    initial_camera_model: StereographicOpenCV,
+) -> None:
+    """Validate that a stereographic OpenCV config could have produced a model.
+
+    Args:
+        config: Camera model configuration.
+        initial_camera_model: Initial model to optimize from.
+    """
+    if config.image_width != initial_camera_model.image_width:
+        raise ValueError(
+            "Initial stereographic OpenCV image_width is incompatible with config: "
+            f"{initial_camera_model.image_width} != {config.image_width}"
+        )
+    if config.image_height != initial_camera_model.image_height:
+        raise ValueError(
+            "Initial stereographic OpenCV image_height is incompatible with config: "
+            f"{initial_camera_model.image_height} != {config.image_height}"
+        )
+    disabled = ~config.included_distortion_coefficients
+    if not np.allclose(initial_camera_model.distortion_coeffs[disabled], 0.0):
+        disabled_indices = np.where(disabled)[0].tolist()
+        raise ValueError(
+            "Initial stereographic OpenCV model has non-zero distortion "
+            f"coefficients that are disabled by the config: {disabled_indices}"
+        )
+
+
+def _validate_stereographic_spline_initial_model_config(
+    config: StereographicSplinedConfig,
+    initial_camera_model: StereographicSplined,
+) -> None:
+    """Validate that a stereographic spline config could have produced a model.
+
+    Args:
+        config: Camera model configuration.
+        initial_camera_model: Initial model to optimize from.
+    """
+    if config.image_width != initial_camera_model.image_width:
+        raise ValueError(
+            "Initial stereographic spline image_width is incompatible with config: "
+            f"{initial_camera_model.image_width} != {config.image_width}"
+        )
+    if config.image_height != initial_camera_model.image_height:
+        raise ValueError(
+            "Initial stereographic spline image_height is incompatible with config: "
+            f"{initial_camera_model.image_height} != {config.image_height}"
+        )
+    if initial_camera_model.num_knots_x != config.num_knots_x:
+        raise ValueError(
+            "Initial stereographic spline num_knots_x is incompatible with config: "
+            f"{initial_camera_model.num_knots_x} != {config.num_knots_x}"
+        )
+    if initial_camera_model.num_knots_y != config.num_knots_y:
+        raise ValueError(
+            "Initial stereographic spline num_knots_y is incompatible with config: "
+            f"{initial_camera_model.num_knots_y} != {config.num_knots_y}"
+        )
+
+    expected_shape = (config.num_knots_y, config.num_knots_x)
+    if initial_camera_model.dx_grid.shape != expected_shape:
+        raise ValueError(
+            "Initial stereographic spline dx_grid shape is incompatible with config: "
+            f"{initial_camera_model.dx_grid.shape} != {expected_shape}"
+        )
+    if initial_camera_model.dy_grid.shape != expected_shape:
+        raise ValueError(
+            "Initial stereographic spline dy_grid shape is incompatible with config: "
+            f"{initial_camera_model.dy_grid.shape} != {expected_shape}"
+        )
+
+    if config.fov_deg_xy is None:
+        return
+
+    fov_deg_x, fov_deg_y = config.fov_deg_xy
+    if not np.isclose(initial_camera_model.fov_deg_x, fov_deg_x):
+        raise ValueError(
+            "Initial stereographic spline fov_deg_x is incompatible with config: "
+            f"{initial_camera_model.fov_deg_x} != {fov_deg_x}"
+        )
+    if not np.isclose(initial_camera_model.fov_deg_y, fov_deg_y):
+        raise ValueError(
+            "Initial stereographic spline fov_deg_y is incompatible with config: "
+            f"{initial_camera_model.fov_deg_y} != {fov_deg_y}"
+        )
+
+
 @overload
 def calibrate_camera(
     target_points: np.ndarray,
@@ -1541,6 +2153,30 @@ def calibrate_camera(
     estimate_target_warp: bool = True,
     outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
 ) -> CalibrationResult[OpenCV]: ...
+
+
+@overload
+def calibrate_camera(
+    target_points: np.ndarray,
+    frames: list[Frame],
+    camera_model_config: StereographicOpenCVConfig,
+    *,
+    initial_camera_model: StereographicOpenCV | None = None,
+    estimate_target_warp: bool = True,
+    outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
+) -> CalibrationResult[StereographicOpenCV]: ...
+
+
+@overload
+def calibrate_camera(
+    target_points: np.ndarray,
+    frames: list[Frame],
+    camera_model_config: StereographicSplinedConfig,
+    *,
+    initial_camera_model: StereographicSplined | None = None,
+    estimate_target_warp: bool = True,
+    outlier_threshold_stddevs: float | None = DEFAULT_OUTLIER_THRESHOLD,
+) -> CalibrationResult[StereographicSplined]: ...
 
 
 def calibrate_camera(
@@ -1606,6 +2242,46 @@ def calibrate_camera(
                 camera_model_config, initial_camera_model
             )
         return _opencv_calibrate(
+            target_points,
+            frames,
+            camera_model_config,
+            outlier_threshold_stddevs,
+            estimate_target_warp,
+            initial_camera_model,
+        )
+
+    if isinstance(camera_model_config, StereographicOpenCVConfig):
+        if initial_camera_model is not None:
+            if not isinstance(initial_camera_model, StereographicOpenCV):
+                raise TypeError(
+                    "initial_camera_model must be a StereographicOpenCV when "
+                    "camera_model_config is a StereographicOpenCVConfig"
+                )
+            _validate_stereographic_opencv_initial_model_config(
+                camera_model_config,
+                initial_camera_model,
+            )
+        return _calibrate_stereographic_opencv(
+            target_points,
+            frames,
+            camera_model_config,
+            outlier_threshold_stddevs,
+            estimate_target_warp,
+            initial_camera_model,
+        )
+
+    if isinstance(camera_model_config, StereographicSplinedConfig):
+        if initial_camera_model is not None:
+            if not isinstance(initial_camera_model, StereographicSplined):
+                raise TypeError(
+                    "initial_camera_model must be a StereographicSplined when "
+                    "camera_model_config is a StereographicSplinedConfig"
+                )
+            _validate_stereographic_spline_initial_model_config(
+                camera_model_config,
+                initial_camera_model,
+            )
+        return _calibrate_stereographic_splined(
             target_points,
             frames,
             camera_model_config,

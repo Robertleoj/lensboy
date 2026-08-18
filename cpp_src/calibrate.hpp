@@ -23,6 +23,17 @@ py::dict calibrate_opencv(
     std::array<double, 5> warp_coeffs_initial = {0.0, 0.0, 0.0, 0.0, 0.0}
 );
 
+py::dict calibrate_stereographic_opencv(
+    std::vector<double>& intrinsics_initial_value,
+    std::vector<bool>& intrinsics_param_optimize_mask,
+    std::vector<Vec6<double>>& cameras_from_target,
+    std::vector<Vec3<double>>& target_points,
+    std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>&
+        frames,
+    std::optional<WarpCoordinates> warp_coordinates = std::nullopt,
+    std::array<double, 5> warp_coeffs_initial = {0.0, 0.0, 0.0, 0.0, 0.0}
+);
+
 py::dict get_matching_spline_distortion_model(
     std::vector<double>& opencv_distortion_params,
     PinholeSplinedOptimizationConfig& model_config,
@@ -40,6 +51,17 @@ py::dict get_matching_stereographic_opencv_model(
 py::dict fine_tune_pinhole_splined(
     PinholeSplinedOptimizationConfig& model_config,
     PinholeSplinedIntrinsicsParameters& intrinsics_parameters,
+    std::vector<Vec6<double>>& cameras_from_target,
+    std::vector<Vec3<double>>& target_points,
+    std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>&
+        frames,
+    std::optional<WarpCoordinates> warp_coordinates = std::nullopt,
+    std::array<double, 5> warp_coeffs_initial = {0.0, 0.0, 0.0, 0.0, 0.0}
+);
+
+py::dict fine_tune_stereographic_splined(
+    StereographicSplinedOptimizationConfig& model_config,
+    StereographicSplinedIntrinsicsParameters& intrinsics_parameters,
     std::vector<Vec6<double>>& cameras_from_target,
     std::vector<Vec3<double>>& target_points,
     std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>&

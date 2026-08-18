@@ -388,6 +388,138 @@ def test_initial_spline_model_must_match_config() -> None:
         )
 
 
+def test_synthetic_stereographic_opencv() -> None:
+    """Calibrate a stereographic OpenCV model from synthetic observations."""
+    rng = np.random.default_rng(123)
+    ground_truth = lb.StereographicOpenCV(
+        image_width=640,
+        image_height=480,
+        fx=320.0,
+        fy=318.0,
+        cx=321.0,
+        cy=239.0,
+        distortion_coeffs=np.array([0.02, -0.001, 0.0001, -0.0002, 0.00005]),
+    )
+    target_points = _make_planar_grid()
+    frames = _generate_synthetic_frames(rng, ground_truth, target_points, num_frames=50)
+
+    assert len(frames) >= 10, f"Too few valid frames ({len(frames)})"
+
+    config = lb.StereographicOpenCVConfig(
+        image_height=ground_truth.image_height,
+        image_width=ground_truth.image_width,
+        included_distortion_coefficients=lb.StereographicOpenCVConfig.STANDARD,
+    )
+    result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=config,
+        estimate_target_warp=False,
+    )
+
+    sigma = result.residual_sigma_map()
+    assert sigma < 0.15, f"Residual sigma too high: {sigma:.3f}px"
+    _check_frame_projections(result, target_points, frames)
+
+
+def test_synthetic_stereographic_splined() -> None:
+    """Calibrate a stereographic spline model from synthetic observations."""
+    rng = np.random.default_rng(321)
+    ground_truth = lb.StereographicSplined(
+        image_width=640,
+        image_height=480,
+        fx=320.0,
+        fy=318.0,
+        cx=321.0,
+        cy=239.0,
+        dx_grid=np.zeros((8, 12), dtype=np.float64),
+        dy_grid=np.zeros((8, 12), dtype=np.float64),
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_x=150.0,
+        fov_deg_y=120.0,
+    )
+    target_points = _make_planar_grid()
+    frames = _generate_synthetic_frames(rng, ground_truth, target_points, num_frames=50)
+
+    assert len(frames) >= 10, f"Too few valid frames ({len(frames)})"
+
+    config = lb.StereographicSplinedConfig(
+        image_height=ground_truth.image_height,
+        image_width=ground_truth.image_width,
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_xy=(150.0, 120.0),
+    )
+    result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=config,
+        estimate_target_warp=False,
+    )
+
+    sigma = result.residual_sigma_map()
+    assert sigma < 0.15, f"Residual sigma too high: {sigma:.3f}px"
+    _check_frame_projections(result, target_points, frames)
+
+
+def test_initial_stereographic_models_must_match_config() -> None:
+    """Reject initial stereographic models that the configs could not produce."""
+    target_points = np.zeros((4, 3), dtype=float)
+    opencv_config = lb.StereographicOpenCVConfig(
+        image_height=480,
+        image_width=640,
+        included_distortion_coefficients=lb.StereographicOpenCVConfig.STANDARD,
+    )
+    disabled_coeffs = np.zeros(14, dtype=np.float64)
+    disabled_coeffs[5] = 0.01
+    opencv_initial = lb.StereographicOpenCV(
+        image_height=480,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        distortion_coeffs=disabled_coeffs,
+    )
+    with pytest.raises(ValueError, match="disabled"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=opencv_config,
+            initial_camera_model=opencv_initial,
+        )
+
+    spline_config = lb.StereographicSplinedConfig(
+        image_height=480,
+        image_width=640,
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_xy=(120.0, 100.0),
+    )
+    spline_initial = lb.StereographicSplined(
+        image_height=480,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        dx_grid=np.zeros((8, 12), dtype=np.float64),
+        dy_grid=np.zeros((8, 12), dtype=np.float64),
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_x=121.0,
+        fov_deg_y=100.0,
+    )
+    with pytest.raises(ValueError, match="fov_deg_x"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=spline_config,
+            initial_camera_model=spline_initial,
+        )
+
+
 def _check_frame_projections(
     result: lb.CalibrationResult,
     target_points: np.ndarray,
