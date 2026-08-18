@@ -36,6 +36,8 @@ from lensboy.geometry.pose import Pose
 
 DEFAULT_OUTLIER_THRESHOLD = 5.0
 MAX_OUTLIER_FILTER_PASSES = 2
+FOCAL_SWEEP_MAX_FRAMES = 20
+SEED_FIT_MAX_FRAMES = 20
 
 
 @dataclass
@@ -55,6 +57,12 @@ class _OptimizationState(Generic[IntrinsicsT]):
     frames: list[Frame]
     warp_coeffs: tuple[float, float, float, float, float] | None
     inlier_masks: list[np.ndarray | None]
+
+
+@dataclass
+class _PnPFrameData:
+    object_points: np.ndarray
+    image_points: np.ndarray
 
 
 def _project_and_calculate_residuals(
@@ -326,21 +334,8 @@ def _run_with_outlier_filtering(
             curr_target_warp = TargetWarp(warp_coordinates, state.warp_coeffs)
 
         elapsed = default_timer() - start
-        mean_reproj, worst_reproj = _compute_mean_reproj(
-            state,
-            target_points,
-            curr_target_warp,
-        )
-        log(
-            f"{label} pass {pass_num}: {elapsed:.1f}s "
-            f"(mean reproj={mean_reproj:.3f}px, worst={worst_reproj:.3f}px)"
-        )
-
-        if outlier_threshold_stddevs is None or iteration == MAX_OUTLIER_FILTER_PASSES:
-            break
-
-        # Compute residuals and update masks
         residuals = []
+        inlier_norms = []
         for i in active_indices:
             pose = state.cameras_from_target[i]
             assert pose is not None
@@ -352,6 +347,23 @@ def _run_with_outlier_filtering(
                 curr_target_warp,
             )
             residuals.append(r)
+
+            mask = state.inlier_masks[i]
+            if mask is None:
+                inlier_norms.append(np.linalg.norm(r, axis=1))
+            else:
+                inlier_norms.append(np.linalg.norm(r[mask], axis=1))
+
+        all_inlier_norms = np.concatenate(inlier_norms)
+        mean_reproj = float(np.mean(all_inlier_norms))
+        worst_reproj = float(np.max(all_inlier_norms))
+        log(
+            f"{label} pass {pass_num}: {elapsed:.1f}s "
+            f"(mean reproj={mean_reproj:.3f}px, worst={worst_reproj:.3f}px)"
+        )
+
+        if outlier_threshold_stddevs is None or iteration == MAX_OUTLIER_FILTER_PASSES:
+            break
 
         new_active_masks = _filter_outliers(residuals, outlier_threshold_stddevs)
 
@@ -458,10 +470,8 @@ def _stereographic_pixels_to_normalized_xy(
     """
     sx = (pixel_coords[:, 0] - cx) / focal_length
     sy = (pixel_coords[:, 1] - cy) / focal_length
-    r_s = np.sqrt(sx * sx + sy * sy + 1e-30)
-    theta = 2.0 * np.arctan(r_s / 2.0)
-    r_n = np.tan(theta)
-    scale = r_n / r_s
+    r_s_sq = sx * sx + sy * sy
+    scale = 1.0 / (1.0 - 0.25 * r_s_sq)
     return np.column_stack([sx * scale, sy * scale])
 
 
@@ -484,12 +494,93 @@ def _project_stereographic_points(
     """
     normalized_x = points_in_camera[:, 0] / points_in_camera[:, 2]
     normalized_y = points_in_camera[:, 1] / points_in_camera[:, 2]
-    r_n = np.sqrt(normalized_x * normalized_x + normalized_y * normalized_y + 1e-30)
-    theta = np.arctan(r_n)
-    scale = 2.0 * np.tan(theta / 2.0) / r_n
+    r_n_sq = normalized_x * normalized_x + normalized_y * normalized_y
+    scale = 2.0 / (np.sqrt(1.0 + r_n_sq) + 1.0)
     sx = normalized_x * scale
     sy = normalized_y * scale
     return np.column_stack([focal_length * sx + cx, focal_length * sy + cy])
+
+
+def _prepare_pnp_frame_data(
+    target_points: np.ndarray,
+    frames: list[Frame],
+) -> list[_PnPFrameData]:
+    """Gather contiguous object and image arrays for repeated PnP solves.
+
+    Args:
+        target_points: Calibration target 3D points, shape (N, 3).
+        frames: Detected calibration frames.
+
+    Returns:
+        Per-frame object points and image detections.
+    """
+    return [
+        _PnPFrameData(
+            object_points=np.ascontiguousarray(
+                target_points[frame.target_point_indices],
+                dtype=np.float64,
+            ),
+            image_points=np.ascontiguousarray(
+                frame.detected_points_in_image,
+                dtype=np.float64,
+            ),
+        )
+        for frame in frames
+    ]
+
+
+def _score_stereographic_focal_length(
+    focal_length: float,
+    pnp_frames: list[_PnPFrameData],
+    cx: float,
+    cy: float,
+) -> float:
+    """Score a centered stereographic focal length with PnP reprojection error.
+
+    Args:
+        focal_length: Centered stereographic focal length.
+        pnp_frames: Prepared frame data.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Mean squared reprojection error per solved target point.
+    """
+    normalized_K = np.eye(3, dtype=np.float64)
+    zero_distortion = np.zeros(4, dtype=np.float64)
+    total_squared_error = 0.0
+    total_points = 0
+
+    for frame_data in pnp_frames:
+        obj_pts = frame_data.object_points
+        img_pts = frame_data.image_points
+        if len(obj_pts) < 4:
+            continue
+
+        normalized_xy = _stereographic_pixels_to_normalized_xy(
+            img_pts,
+            focal_length,
+            cx,
+            cy,
+        )
+        success, rvec, tvec = cv2.solvePnP(
+            obj_pts,
+            normalized_xy,
+            normalized_K,
+            zero_distortion,
+        )
+        if not success:
+            continue
+
+        rotmat = cv2.Rodrigues(rvec)[0]
+        points_in_cam = obj_pts @ rotmat.T + tvec.reshape(1, 3)
+        projected = _project_stereographic_points(points_in_cam, focal_length, cx, cy)
+        total_squared_error += float(np.sum((projected - img_pts) ** 2))
+        total_points += len(obj_pts)
+
+    if total_points == 0:
+        return float("inf")
+    return total_squared_error / total_points
 
 
 def _solve_pnp_all_frames_stereographic(
@@ -717,28 +808,36 @@ def _get_initial_state_with_pnp(
 
     max_dim = max(config.image_width, config.image_height)
     candidates = np.geomspace(0.2 * max_dim, 5.0 * max_dim, num=30)
+    sweep_frames = _select_focal_sweep_frames(
+        frames,
+        config.image_width,
+        config.image_height,
+    )
+    sweep_pnp_frames = _prepare_pnp_frame_data(target_points, sweep_frames)
 
     best_focal = float(candidates[0])
     best_error = float("inf")
-    best_poses: list[Pose] = []
-    best_solved: list[bool] = []
 
     for f in candidates:
-        poses, solved, error = _solve_pnp_all_frames_stereographic(
+        error = _score_stereographic_focal_length(
             float(f),
-            target_points,
-            frames,
+            sweep_pnp_frames,
             cx,
             cy,
         )
         if error < best_error:
             best_error = error
             best_focal = float(f)
-            best_poses = poses
-            best_solved = solved
 
     log(f"Auto-estimated initial stereographic focal length: {best_focal:.1f} px")
 
+    best_poses, best_solved, _ = _solve_pnp_all_frames_stereographic(
+        best_focal,
+        target_points,
+        frames,
+        cx,
+        cy,
+    )
     intrinsics = _matching_opencv_model_from_stereographic(config, best_focal)
     return intrinsics, best_poses, best_solved
 
@@ -793,28 +892,36 @@ def _get_initial_state_with_pnp_stereographic_opencv(
 
     max_dim = max(config.image_width, config.image_height)
     candidates = np.geomspace(0.2 * max_dim, 5.0 * max_dim, num=30)
+    sweep_frames = _select_focal_sweep_frames(
+        frames,
+        config.image_width,
+        config.image_height,
+    )
+    sweep_pnp_frames = _prepare_pnp_frame_data(target_points, sweep_frames)
 
     best_focal = float(candidates[0])
     best_error = float("inf")
-    best_poses: list[Pose] = []
-    best_solved: list[bool] = []
 
     for f in candidates:
-        poses, solved, error = _solve_pnp_all_frames_stereographic(
+        error = _score_stereographic_focal_length(
             float(f),
-            target_points,
-            frames,
+            sweep_pnp_frames,
             cx,
             cy,
         )
         if error < best_error:
             best_error = error
             best_focal = float(f)
-            best_poses = poses
-            best_solved = solved
 
     log(f"Auto-estimated initial stereographic focal length: {best_focal:.1f} px")
 
+    best_poses, best_solved, _ = _solve_pnp_all_frames_stereographic(
+        best_focal,
+        target_points,
+        frames,
+        cx,
+        cy,
+    )
     model = StereographicOpenCV(
         image_height=config.image_height,
         image_width=config.image_width,
@@ -1366,6 +1473,35 @@ def _select_covering_frames(
     return selected
 
 
+def _select_focal_sweep_frames(
+    frames: list[Frame],
+    image_width: int,
+    image_height: int,
+    max_frames: int = FOCAL_SWEEP_MAX_FRAMES,
+) -> list[Frame]:
+    """Select frames used for initial focal-length sweeps.
+
+    Args:
+        frames: Input calibration frames.
+        image_width: Image width in pixels.
+        image_height: Image height in pixels.
+        max_frames: Maximum number of frames to keep.
+
+    Returns:
+        Coverage-selected frames, or all frames if the input is already small.
+    """
+    if len(frames) <= max_frames:
+        return frames
+
+    sub_indices = _select_covering_frames(
+        frames,
+        image_width,
+        image_height,
+        max_frames=max_frames,
+    )
+    return [frames[i] for i in sub_indices]
+
+
 def _compute_fov_from_spline_model(
     model: PinholeSplined,
     padding_fraction: float = 0.05,
@@ -1455,7 +1591,12 @@ def _fit_opencv_seed(
         Tuple of (calibration result, indices of subsampled frames).
     """
     start_time = default_timer()
-    sub_indices = _select_covering_frames(frames, config.image_width, config.image_height)
+    sub_indices = _select_covering_frames(
+        frames,
+        config.image_width,
+        config.image_height,
+        max_frames=SEED_FIT_MAX_FRAMES,
+    )
     subsampled_frames = [frames[i] for i in sub_indices]
 
     opencv_config = OpenCVConfig(
@@ -1479,6 +1620,60 @@ def _fit_opencv_seed(
     fov_x, fov_y = _compute_fov_from_opencv(result.camera_model, padding_fraction=0.0)
     log(
         f"Fitted OpenCV seed model: {default_timer() - start_time:.1f}s "
+        f"(FOV: {fov_x:.1f}° x {fov_y:.1f}°)"
+    )
+    return result, sub_indices
+
+
+def _fit_stereographic_opencv_seed(
+    target_points: np.ndarray,
+    frames: list[Frame],
+    config: StereographicSplinedConfig,
+) -> tuple[CalibrationResult[StereographicOpenCV], list[int]]:
+    """Fit a stereographic OpenCV seed model on coverage-selected frames.
+
+    Args:
+        target_points: 3D target points, shape (N, 3).
+        frames: All calibration frames.
+        config: Stereographic spline config used for image size and focal guess.
+
+    Returns:
+        Tuple of calibration result and selected frame indices.
+    """
+    start_time = default_timer()
+    sub_indices = _select_covering_frames(
+        frames,
+        config.image_width,
+        config.image_height,
+        max_frames=SEED_FIT_MAX_FRAMES,
+    )
+    subsampled_frames = [frames[i] for i in sub_indices]
+
+    seed_config = StereographicOpenCVConfig(
+        image_height=config.image_height,
+        image_width=config.image_width,
+        initial_focal_length=config.initial_focal_length,
+        included_distortion_coefficients=StereographicOpenCVConfig.FULL_14,
+    )
+
+    disable_logs()
+    try:
+        result = _calibrate_stereographic_opencv(
+            target_points,
+            subsampled_frames,
+            seed_config,
+            None,
+            estimate_target_warp=False,
+        )
+    finally:
+        enable_logs()
+
+    fov_x, fov_y = _compute_fov_from_unit_ray_model(
+        result.camera_model,
+        padding_fraction=0.0,
+    )
+    log(
+        f"Fitted stereographic OpenCV seed model: {default_timer() - start_time:.1f}s "
         f"(FOV: {fov_x:.1f}° x {fov_y:.1f}°)"
     )
     return result, sub_indices
@@ -1838,19 +2033,7 @@ def _calibrate_stereographic_splined(
     )
 
     if initial_camera_model is None:
-        seed_config = StereographicOpenCVConfig(
-            image_height=config.image_height,
-            image_width=config.image_width,
-            initial_focal_length=config.initial_focal_length,
-            included_distortion_coefficients=StereographicOpenCVConfig.FULL_14,
-        )
-        seed_result = _calibrate_stereographic_opencv(
-            target_points,
-            frames,
-            seed_config,
-            outlier_threshold_stddevs,
-            estimate_target_warp,
-        )
+        seed_result, _ = _fit_stereographic_opencv_seed(target_points, frames, config)
         seed_model = seed_result.camera_model
         if config.fov_deg_xy is not None:
             fov_deg_x, fov_deg_y = config.fov_deg_xy
@@ -1873,18 +2056,27 @@ def _calibrate_stereographic_splined(
             fov_deg_x,
             fov_deg_y,
         )
-        poses = list(seed_result.cameras_from_target)
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            seed_model,
+            target_points,
+            frames,
+        )
+        n_solved = sum(pnp_solved_mask)
+        log(f"PnP solved {n_solved}/{len(frames)} frames")
+
+        poses = []
         inlier_masks = []
-        for frame_diagnostics in seed_result.frame_diagnostics:
-            if frame_diagnostics is None:
-                inlier_masks.append(None)
+        for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
+            if ok:
+                poses.append(camera_from_target)
+                inlier_masks.append(np.ones(len(frame), dtype=bool))
                 continue
-            inlier_masks.append(frame_diagnostics.inlier_mask)
+            poses.append(None)
+            inlier_masks.append(None)
         warp_coordinates = None
+        if estimate_target_warp:
+            warp_coordinates = _make_warp_coordinates(target_points)
         warp_coeffs = None
-        if seed_result.target_warp is not None:
-            warp_coordinates = seed_result.target_warp.warp_coordinates
-            warp_coeffs = seed_result.target_warp.object_warp
     else:
         model = initial_camera_model
         all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
