@@ -490,6 +490,23 @@ def test_initial_stereographic_models_must_match_config() -> None:
             initial_camera_model=opencv_initial,
         )
 
+    opencv_wrong_size = lb.StereographicOpenCV(
+        image_height=481,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        distortion_coeffs=np.zeros(14, dtype=np.float64),
+    )
+    with pytest.raises(ValueError, match="image_height"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=opencv_config,
+            initial_camera_model=opencv_wrong_size,
+        )
+
     spline_config = lb.StereographicSplinedConfig(
         image_height=480,
         image_width=640,
@@ -517,6 +534,72 @@ def test_initial_stereographic_models_must_match_config() -> None:
             [],
             camera_model_config=spline_config,
             initial_camera_model=spline_initial,
+        )
+
+    spline_wrong_size = lb.StereographicSplined(
+        image_height=481,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        dx_grid=np.zeros((8, 12), dtype=np.float64),
+        dy_grid=np.zeros((8, 12), dtype=np.float64),
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_x=120.0,
+        fov_deg_y=100.0,
+    )
+    with pytest.raises(ValueError, match="image_height"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=spline_config,
+            initial_camera_model=spline_wrong_size,
+        )
+
+    spline_wrong_knots = lb.StereographicSplined(
+        image_height=480,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        dx_grid=np.zeros((8, 13), dtype=np.float64),
+        dy_grid=np.zeros((8, 13), dtype=np.float64),
+        num_knots_x=13,
+        num_knots_y=8,
+        fov_deg_x=120.0,
+        fov_deg_y=100.0,
+    )
+    with pytest.raises(ValueError, match="num_knots_x"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=spline_config,
+            initial_camera_model=spline_wrong_knots,
+        )
+
+    spline_wrong_grid_shape = lb.StereographicSplined(
+        image_height=480,
+        image_width=640,
+        fx=300.0,
+        fy=300.0,
+        cx=320.0,
+        cy=240.0,
+        dx_grid=np.zeros((7, 12), dtype=np.float64),
+        dy_grid=np.zeros((7, 12), dtype=np.float64),
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_x=120.0,
+        fov_deg_y=100.0,
+    )
+    with pytest.raises(ValueError, match="dx_grid"):
+        lb.calibrate_camera(
+            target_points,
+            [],
+            camera_model_config=spline_config,
+            initial_camera_model=spline_wrong_grid_shape,
         )
 
 
