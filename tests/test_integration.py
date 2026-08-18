@@ -13,6 +13,9 @@ from lensboy.geometry.pose import Pose
 
 DATASET_PATH = Path(__file__).parent.parent / "data/test_datasets/wide_angle_charuco.npz"
 CUBISM_DATASET_PATH = Path(__file__).parent.parent / "data/test_datasets/cubism.json"
+WIDE_ANGLE_DATASET_PATH = (
+    Path(__file__).parent.parent / "data/test_datasets/wide_angle_test.json"
+)
 
 
 def load_test_dataset() -> tuple[np.ndarray, list[lb.Frame], int, int]:
@@ -68,6 +71,47 @@ def load_cubism_dataset() -> tuple[np.ndarray, list[lb.Frame], int, int]:
     ]
 
     return target_points, frames, image_height, image_width
+
+
+def load_wide_angle_dataset() -> tuple[np.ndarray, list[lb.Frame], int, int]:
+    """Load the wide-angle JSON dataset.
+
+    Returns:
+        target_points: 3D target coordinates, shape (N, 3).
+        frames: Per-image detection frames.
+        image_height: Image height in pixels.
+        image_width: Image width in pixels.
+    """
+    data = json.loads(WIDE_ANGLE_DATASET_PATH.read_text())
+    image_width = int(data["imageDimensions"]["width"])
+    image_height = int(data["imageDimensions"]["height"])
+
+    id_to_index: dict[str, int] = {}
+    target_points = []
+    for idx, point in enumerate(data["targetPoints"]):
+        id_to_index[point["id"]] = idx
+        position = point["positionMm"]
+        target_points.append([position["x"], position["y"], position["z"]])
+
+    frames = []
+    for sample in data["samples"]:
+        indices = []
+        pixels = []
+        for detection in sample["detections"]:
+            point_idx = id_to_index.get(detection["id"])
+            if point_idx is None:
+                continue
+            pixel = detection["pixel"]
+            indices.append(point_idx)
+            pixels.append([pixel["x"], pixel["y"]])
+        frames.append(
+            lb.Frame(
+                target_point_indices=np.asarray(indices, dtype=np.int32),
+                detected_points_in_image=np.asarray(pixels, dtype=np.float64),
+            )
+        )
+
+    return np.asarray(target_points, dtype=np.float64), frames, image_height, image_width
 
 
 def test_opencv_full14() -> None:
@@ -461,6 +505,47 @@ def test_synthetic_stereographic_splined() -> None:
     sigma = result.residual_sigma_map()
     assert sigma < 0.15, f"Residual sigma too high: {sigma:.3f}px"
     _check_frame_projections(result, target_points, frames)
+
+
+def test_wide_angle_spline_models_have_matching_ray_fields() -> None:
+    """Stereographic and pinhole splines agree on the supported wide-angle field."""
+    from lensboy.analysis.differencing import compute_projection_diff
+
+    target_points, frames, img_h, img_w = load_wide_angle_dataset()
+    pinhole_result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=lb.PinholeSplinedConfig(
+            image_height=img_h,
+            image_width=img_w,
+            num_knots_x=24,
+            num_knots_y=16,
+        ),
+    )
+    stereographic_result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=lb.StereographicSplinedConfig(
+            image_height=img_h,
+            image_width=img_w,
+            num_knots_x=24,
+            num_knots_y=16,
+        ),
+    )
+
+    pixels, _, diff, _, _ = compute_projection_diff(
+        pinhole_result.camera_model,
+        stereographic_result.camera_model,
+        radius=826.0,
+        grid_density=120,
+    )
+    center = np.array([(img_w - 1) / 2.0, (img_h - 1) / 2.0])
+    radii = np.linalg.norm(pixels - center, axis=1)
+    diff_norm = np.linalg.norm(diff, axis=1)
+    supported = (radii <= 826.0) & np.isfinite(diff_norm)
+
+    assert np.median(diff_norm[supported]) < 0.02
+    assert np.percentile(diff_norm[supported], 95) < 0.04
 
 
 def test_initial_stereographic_models_must_match_config() -> None:

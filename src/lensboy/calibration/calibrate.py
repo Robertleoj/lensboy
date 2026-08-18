@@ -2033,7 +2033,19 @@ def _calibrate_stereographic_splined(
     )
 
     if initial_camera_model is None:
-        seed_result, _ = _fit_stereographic_opencv_seed(target_points, frames, config)
+        seed_config = StereographicOpenCVConfig(
+            image_height=config.image_height,
+            image_width=config.image_width,
+            initial_focal_length=config.initial_focal_length,
+            included_distortion_coefficients=StereographicOpenCVConfig.FULL_14,
+        )
+        seed_result = _calibrate_stereographic_opencv(
+            target_points,
+            frames,
+            seed_config,
+            outlier_threshold_stddevs,
+            estimate_target_warp,
+        )
         seed_model = seed_result.camera_model
         if config.fov_deg_xy is not None:
             fov_deg_x, fov_deg_y = config.fov_deg_xy
@@ -2056,27 +2068,18 @@ def _calibrate_stereographic_splined(
             fov_deg_x,
             fov_deg_y,
         )
-        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
-            seed_model,
-            target_points,
-            frames,
-        )
-        n_solved = sum(pnp_solved_mask)
-        log(f"PnP solved {n_solved}/{len(frames)} frames")
-
-        poses = []
+        poses = list(seed_result.cameras_from_target)
         inlier_masks = []
-        for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
-            if ok:
-                poses.append(camera_from_target)
-                inlier_masks.append(np.ones(len(frame), dtype=bool))
+        for frame_diagnostics in seed_result.frame_diagnostics:
+            if frame_diagnostics is None:
+                inlier_masks.append(None)
                 continue
-            poses.append(None)
-            inlier_masks.append(None)
+            inlier_masks.append(frame_diagnostics.inlier_mask)
         warp_coordinates = None
-        if estimate_target_warp:
-            warp_coordinates = _make_warp_coordinates(target_points)
         warp_coeffs = None
+        if seed_result.target_warp is not None:
+            warp_coordinates = seed_result.target_warp.warp_coordinates
+            warp_coeffs = seed_result.target_warp.object_warp
     else:
         model = initial_camera_model
         all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
