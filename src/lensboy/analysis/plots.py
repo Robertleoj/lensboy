@@ -612,7 +612,7 @@ def plot_distortion_grid(
                     zorder=10,
                 )
 
-    if show_spline_knots and isinstance(model, lb.PinholeSplined):
+    if show_spline_knots and isinstance(model, lb.PinholeSplined | lb.StereographicSplined):
         Nx = model.num_knots_x
         Ny = model.num_knots_y
         kx_indices = np.arange(Nx)

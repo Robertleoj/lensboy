@@ -1502,42 +1502,6 @@ def _select_focal_sweep_frames(
     return [frames[i] for i in sub_indices]
 
 
-def _compute_fov_from_spline_model(
-    model: PinholeSplined,
-    padding_fraction: float = 0.05,
-    max_fov_deg: float = 175.0,
-) -> tuple[float, float]:
-    """Compute FOV by unprojecting the image corners through the spline model.
-
-    Args:
-        model: Fitted spline model.
-        padding_fraction: Fractional padding to add to each FOV axis.
-        max_fov_deg: Maximum allowed FOV.
-
-    Returns:
-        Padded (fov_deg_x, fov_deg_y), capped at max_fov_deg.
-    """
-    w, h = float(model.image_width), float(model.image_height)
-    n = 50
-    t = np.linspace(0, 1, n)
-    edges = np.concatenate(
-        [
-            np.column_stack([t * w, np.zeros(n)]),  # top
-            np.column_stack([t * w, np.full(n, h)]),  # bottom
-            np.column_stack([np.zeros(n), t * h]),  # left
-            np.column_stack([np.full(n, w), t * h]),  # right
-        ]
-    )
-    normalized = model.normalize_points(edges)
-    half_x = float(np.abs(normalized[:, 0]).max())
-    half_y = float(np.abs(normalized[:, 1]).max())
-
-    fov_x = float(np.degrees(2 * np.arctan(half_x * (1 + padding_fraction))))
-    fov_y = float(np.degrees(2 * np.arctan(half_y * (1 + padding_fraction))))
-
-    return (min(fov_x, max_fov_deg), min(fov_y, max_fov_deg))
-
-
 def _compute_fov_from_unit_ray_model(
     model: StereographicOpenCV | StereographicSplined,
     padding_fraction: float = 0.05,
@@ -1573,6 +1537,42 @@ def _compute_fov_from_unit_ray_model(
         min(fov_x * (1 + padding_fraction), max_fov_deg),
         min(fov_y * (1 + padding_fraction), max_fov_deg),
     )
+
+
+def _compute_spline_grid_fov_from_unit_ray_model(
+    model: StereographicOpenCV,
+    max_fov_deg: float = 175.0,
+) -> tuple[float, float]:
+    """Compute spline-grid FOV from image-border stereographic coordinates.
+
+    Args:
+        model: Fitted stereographic camera model.
+        max_fov_deg: Maximum allowed FOV.
+
+    Returns:
+        Symmetric (fov_deg_x, fov_deg_y) covering the image border, capped at
+        max_fov_deg.
+    """
+    w, h = float(model.image_width), float(model.image_height)
+    n = 80
+    t = np.linspace(0, 1, n)
+    edges = np.concatenate(
+        [
+            np.column_stack([t * w, np.zeros(n)]),
+            np.column_stack([t * w, np.full(n, h)]),
+            np.column_stack([np.zeros(n), t * h]),
+            np.column_stack([np.full(n, w), t * h]),
+        ]
+    )
+    rays = model.normalize_points(edges)
+    denominator = 1.0 + rays[:, 2]
+    stereographic_x = 2.0 * rays[:, 0] / denominator
+    stereographic_y = 2.0 * rays[:, 1] / denominator
+    half_x = float(np.max(np.abs(stereographic_x)))
+    half_y = float(np.max(np.abs(stereographic_y)))
+    fov_x = float(np.degrees(4.0 * np.arctan(half_x / 2.0)))
+    fov_y = float(np.degrees(4.0 * np.arctan(half_y / 2.0)))
+    return min(fov_x, max_fov_deg), min(fov_y, max_fov_deg)
 
 
 def _fit_opencv_seed(
@@ -1680,100 +1680,49 @@ def _fit_stereographic_opencv_seed(
 
 
 def _estimate_spline_fov(
-    opencv_model: OpenCV,
-    opencv_result: CalibrationResult[OpenCV],
     frames: list[Frame],
     sub_indices: list[int],
     target_points: np.ndarray,
     config: PinholeSplinedConfig,
-    opencv_fov_x: float,
-    opencv_fov_y: float,
 ) -> tuple[float, float]:
-    """Estimate the spline FOV by fitting a coarse spline and unprojecting image edges.
+    """Estimate the spline FOV from a raw stereographic fit.
 
     Args:
-        opencv_model: Seed OpenCV model.
-        opencv_result: Calibration result from the seed model.
         frames: All calibration frames.
         sub_indices: Indices of subsampled frames used for the seed model.
         target_points: 3D target points, shape (N, 3).
         config: Spline config.
-        opencv_fov_x: OpenCV model's FOV in x (no padding).
-        opencv_fov_y: OpenCV model's FOV in y (no padding).
 
     Returns:
         Estimated (fov_deg_x, fov_deg_y) for the full spline model.
     """
-    coarse_fov_x, coarse_fov_y = _compute_fov_from_opencv(
-        opencv_model, padding_fraction=0.30
-    )
-
-    coarse_nx = min(config.num_knots_x, 10)
-    coarse_ny = min(config.num_knots_y, 8)
-    coarse_cpp_config = lbb.PinholeSplinedOptimizationConfig(
-        config.image_width,
-        config.image_height,
-        coarse_fov_x,
-        coarse_fov_y,
-        coarse_nx,
-        coarse_ny,
-        1.0,  # strong smoothness for coarse model
-    )
-
-    coarse_image_bound_x = np.tan(np.deg2rad(opencv_fov_x) / 2.0) * 0.8
-    coarse_image_bound_y = np.tan(np.deg2rad(opencv_fov_y) / 2.0) * 0.8
-    coarse_out = lbb.get_matching_spline_distortion_model(
-        opencv_model.distortion_coeffs.tolist(),
-        coarse_cpp_config,
-        float(coarse_image_bound_x),
-        float(coarse_image_bound_y),
-    )
-
-    coarse_model = PinholeSplined(
+    sub_frames = [frames[i] for i in sub_indices]
+    stereographic_config = StereographicOpenCVConfig(
         image_height=config.image_height,
         image_width=config.image_width,
-        fx=opencv_model.fx,
-        fy=opencv_model.fy,
-        cx=opencv_model.cx,
-        cy=opencv_model.cy,
-        dx_grid=coarse_out["x_knots"],
-        dy_grid=coarse_out["y_knots"],
-        num_knots_x=coarse_nx,
-        num_knots_y=coarse_ny,
-        fov_deg_x=coarse_fov_x,
-        fov_deg_y=coarse_fov_y,
+        initial_focal_length=config.initial_focal_length,
+        included_distortion_coefficients=StereographicOpenCVConfig.NONE,
     )
-
-    all_pnp = opencv_result.cameras_from_target
-    sub_frames = [frames[i] for i in sub_indices]
-    solved_poses = [p for p in all_pnp if p is not None]
-    solved_frames = [f for f, p in zip(sub_frames, all_pnp) if p is not None]
 
     start_time = default_timer()
-    coarse_result = _pinhole_splined_refine_inner(
-        _OptimizationBatch(
-            intrinsics=coarse_model,
-            cameras_from_target=solved_poses,
-            frames=solved_frames,
-            warp_coeffs=None,
-        ),
-        PinholeSplinedConfig(
-            image_height=config.image_height,
-            image_width=config.image_width,
-            num_knots_x=coarse_nx,
-            num_knots_y=coarse_ny,
-            fov_deg_xy=(coarse_fov_x, coarse_fov_y),
-            smoothness_lambda=1.0,
-        ),
-        target_points,
-        None,
-    )
+    disable_logs()
+    try:
+        stereographic_result = _calibrate_stereographic_opencv(
+            target_points,
+            sub_frames,
+            stereographic_config,
+            None,
+            estimate_target_warp=False,
+        )
+    finally:
+        enable_logs()
 
-    fov_deg_x, fov_deg_y = _compute_fov_from_spline_model(
-        coarse_result.intrinsics, padding_fraction=0.05
+    fov_deg_x, fov_deg_y = _compute_spline_grid_fov_from_unit_ray_model(
+        stereographic_result.camera_model,
     )
     log(
-        f"Spline FOV estimate: {default_timer() - start_time:.1f}s "
+        f"Spline FOV estimate from raw stereographic fit: "
+        f"{default_timer() - start_time:.1f}s "
         f"({fov_deg_x:.1f}° x {fov_deg_y:.1f}°)"
     )
     return fov_deg_x, fov_deg_y
@@ -1919,14 +1868,10 @@ def _calibrate_pinhole_splined(
             log(f"Spline FOV (user-specified): {fov_deg_x:.1f}° x {fov_deg_y:.1f}°")
         else:
             fov_deg_x, fov_deg_y = _estimate_spline_fov(
-                opencv_model,
-                opencv_result,
                 frames,
                 sub_indices,
                 target_points,
                 config,
-                opencv_fov_x,
-                opencv_fov_y,
             )
 
         # Stage 3: Build full spline model

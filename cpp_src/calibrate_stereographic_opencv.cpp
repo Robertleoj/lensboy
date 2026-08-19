@@ -20,15 +20,15 @@ static bool configure_sparse_schur_if_available(
         return true;
     }
 
-    if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::ACCELERATE_SPARSE)) {
-        options.linear_solver_type = ceres::SPARSE_SCHUR;
-        options.sparse_linear_algebra_library_type = ceres::ACCELERATE_SPARSE;
-        return true;
-    }
-
     if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::EIGEN_SPARSE)) {
         options.linear_solver_type = ceres::SPARSE_SCHUR;
         options.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+        return true;
+    }
+
+    if (ceres::IsSparseLinearAlgebraLibraryTypeAvailable(ceres::ACCELERATE_SPARSE)) {
+        options.linear_solver_type = ceres::SPARSE_SCHUR;
+        options.sparse_linear_algebra_library_type = ceres::ACCELERATE_SPARSE;
         return true;
     }
 
