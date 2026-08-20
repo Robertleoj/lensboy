@@ -13,6 +13,8 @@ from lensboy.camera_models.opencv import OpenCV
 from lensboy.camera_models.pinhole_splined import (
     PinholeSplined,
 )
+from lensboy.camera_models.stereographic_opencv import StereographicOpenCV
+from lensboy.camera_models.stereographic_splined import StereographicSplined
 from lensboy.geometry.pose import Pose
 
 
@@ -153,7 +155,13 @@ class Frame:
         return self.target_point_indices.shape[0]
 
 
-IntrinsicsT = TypeVar("IntrinsicsT", OpenCV, PinholeSplined)
+IntrinsicsT = TypeVar(
+    "IntrinsicsT",
+    OpenCV,
+    PinholeSplined,
+    StereographicOpenCV,
+    StereographicSplined,
+)
 
 
 @dataclass
@@ -387,6 +395,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
 
         Returns:
             The figure if ``return_figure`` is True, otherwise None.
+
         """
         from lensboy.analysis.plots import plot_distortion_grid
 

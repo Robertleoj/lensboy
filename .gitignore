@@ -20,6 +20,7 @@ site/
 vcpkg_installed
 
 **/*.ipynb
+!examples/synthetic_220_degree_stereographic.ipynb
 **/*.ini
 
 data/images/

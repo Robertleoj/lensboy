@@ -212,13 +212,10 @@ def _sample_xy_grid_seeded(
         y_coords: Grid y pixel coordinates, shape ``(grid_height,)``.
 
     Returns:
-        Sampled xy grid, shape ``(grid_height, grid_width, 2)``.
+        Sampled xy grid, shape ``(grid_height, grid_width, 2)`` for pinhole-like
+        models, or ray grid, shape ``(grid_height, grid_width, 3)`` for models
+        whose normalization returns unit bearings.
     """
-    if not isinstance(camera_model, (OpenCV, PinholeSplined)):
-        raise TypeError(
-            "UnprojectLUT is only supported for OpenCV and PinholeSplined models."
-        )
-
     grid_width = len(x_coords)
     grid_height = len(y_coords)
 
@@ -226,6 +223,10 @@ def _sample_xy_grid_seeded(
     query_pixels = np.ascontiguousarray(
         np.column_stack([gx.ravel(), gy.ravel()]), dtype=np.float64
     )
+
+    if not isinstance(camera_model, (OpenCV, PinholeSplined)):
+        rays = camera_model.normalize_points(query_pixels)
+        return np.asarray(rays, dtype=np.float64).reshape(grid_height, grid_width, 3)
 
     seed_pixels, seed_normals, seed_width, seed_height = _compute_seed_grid(camera_model)
 
@@ -281,17 +282,18 @@ def _linear_indices_and_weights(
 class UnprojectLUT:
     """Regular-grid cache of `normalize_points()` values.
 
-    Stores the x/y components of camera-frame rays on a regular image-space
-    grid that always spans ``[0, image_width - 1] x [0, image_height - 1]``.
-    Queries interpolate those cached values and return rays of the form
-    ``[x, y, 1]``.
+    Stores camera-frame rays on a regular image-space grid that always spans
+    ``[0, image_width - 1] x [0, image_height - 1]``. Legacy pinhole-style LUTs
+    cache x/y components and return rays of the form ``[x, y, 1]``.
+    Stereographic LUTs cache full unit bearings, including z.
 
     The grid sample count is taken directly from the shape of ``xy_grid``.
 
     Args:
         image_width: Width of the source image in pixels.
         image_height: Height of the source image in pixels.
-        xy_grid: Cached x/y ray components with shape ``(grid_height, grid_width, 2)``.
+        xy_grid: Cached x/y ray components with shape ``(grid_height, grid_width, 2)``,
+            or full rays with shape ``(grid_height, grid_width, 3)``.
         lensboy_version: Package version that produced the LUT.
     """
 
@@ -307,9 +309,10 @@ class UnprojectLUT:
             raise ValueError("image dimensions must be positive.")
 
         grid = np.asarray(self.xy_grid, dtype=np.float64)
-        if grid.ndim != 3 or grid.shape[2] != 2:
+        if grid.ndim != 3 or grid.shape[2] not in (2, 3):
             raise ValueError(
-                f"xy_grid must have shape (grid_height, grid_width, 2), got {grid.shape}."
+                "xy_grid must have shape (grid_height, grid_width, 2) or "
+                f"(grid_height, grid_width, 3), got {grid.shape}."
             )
         if grid.shape[0] < 1 or grid.shape[1] < 1:
             raise ValueError("grid dimensions must be positive.")
@@ -506,8 +509,12 @@ class UnprojectLUT:
         rays[:, 2] = 1.0
 
         if np.any(valid_mask):
-            approx_xy = self._interpolate_xy(pts[valid_mask], interpolation)
-            rays[valid_mask, :2] = approx_xy
+            approx = self._interpolate_xy(pts[valid_mask], interpolation)
+            if approx.shape[1] == 2:
+                rays[valid_mask, :2] = approx
+            else:
+                norms = np.linalg.norm(approx, axis=1, keepdims=True)
+                rays[valid_mask] = approx / norms
 
         return rays, valid_mask
 

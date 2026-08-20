@@ -1,4 +1,6 @@
+#include <ceres/jet.h>
 #include <spdlog/spdlog.h>
+#include <unsupported/Eigen/AutoDiff>
 #include "./pybind_utils.hpp"
 #include "cameramodels.hpp"
 #include "ceres_geometry.hpp"
@@ -65,6 +67,297 @@ static py::array_t<double> project_pinhole_splined_pywrapper(
 
         O[i * 2 + 0] = r[0];
         O[i * 2 + 1] = r[1];
+    }
+
+    return out;
+}
+
+static py::array_t<double> project_stereographic_opencv_pywrapper(
+    lensboy::StereographicOpenCVModelDefinition& model_config,
+    py::array_t<double, py::array::c_style | py::array::forcecast> intrinsics,
+    py::array_t<double, py::array::c_style | py::array::forcecast>
+        points_in_camera
+) {
+    auto ib = intrinsics.request();
+    require(ib.ndim == 1, "intrinsics must be a 1D numpy array");
+    require(ib.shape[0] == 18, "intrinsics must have shape (18,)");
+
+    auto pb = points_in_camera.request();
+    require(pb.ndim == 2, "points_in_camera must be a 2D numpy array");
+    require(pb.shape[1] == 3, "points_in_camera must have shape (N, 3)");
+
+    const ssize_t N = pb.shape[0];
+    const double* params = static_cast<const double*>(ib.ptr);
+    const double* P = static_cast<const double*>(pb.ptr);
+
+    py::array_t<double> out({N, (ssize_t)2});
+    auto ob = out.request();
+    auto* O = static_cast<double*>(ob.ptr);
+
+    py::gil_scoped_release release;
+    for (ssize_t i = 0; i < N; ++i) {
+        Vec3<double> p(P[i * 3 + 0], P[i * 3 + 1], P[i * 3 + 2]);
+        Vec2<double> r;
+        project_stereographic_opencv<double>(
+            params,
+            p,
+            r
+        );
+        O[i * 2 + 0] = r[0];
+        O[i * 2 + 1] = r[1];
+    }
+
+    return out;
+}
+
+static py::array_t<double> normalize_stereographic_opencv_points(
+    lensboy::StereographicOpenCVModelDefinition& model_config,
+    py::array_t<double, py::array::c_style | py::array::forcecast> intrinsics,
+    py::array_t<double, py::array::c_style | py::array::forcecast> pixel_coords
+) {
+    auto ib = intrinsics.request();
+    require(ib.ndim == 1, "intrinsics must be a 1D numpy array");
+    require(ib.shape[0] == 18, "intrinsics must have shape (18,)");
+    const double* params = static_cast<const double*>(ib.ptr);
+    const double fx = params[0], fy = params[1], cx = params[2], cy = params[3];
+    require(fx != 0.0 && fy != 0.0, "fx/fy must be non-zero");
+
+    auto pb = pixel_coords.request();
+    require(pb.ndim == 2, "pixel_coords must be a 2D numpy array");
+    require(pb.shape[1] == 2, "pixel_coords must have shape (N, 2)");
+    const ssize_t N = pb.shape[0];
+    const double* P = static_cast<const double*>(pb.ptr);
+
+    py::array_t<double> out({N, (ssize_t)3});
+    auto ob = out.request();
+    double* O = static_cast<double*>(ob.ptr);
+
+    constexpr int max_newton = 50;
+    constexpr double tol = 1e-14;
+    for (ssize_t i = 0; i < N; i++) {
+        const double target_x = (P[i * 2 + 0] - cx) / fx;
+        const double target_y = (P[i * 2 + 1] - cy) / fy;
+        double sx = target_x;
+        double sy = target_y;
+
+        for (int iter = 0; iter < max_newton; iter++) {
+            using Dual = Eigen::AutoDiffScalar<Eigen::Vector2d>;
+            Dual dual_sx(sx, 2, 0);
+            Dual dual_sy(sy, 2, 1);
+            Dual coeffs[14];
+            for (int coeff_idx = 0; coeff_idx < 14; coeff_idx++) {
+                coeffs[coeff_idx] = Dual(params[4 + coeff_idx]);
+            }
+            Vec2<Dual> distorted;
+            distort_opencv(coeffs, Vec2<Dual>(dual_sx, dual_sy), distorted);
+
+            const double res0 = distorted[0].value() - target_x;
+            const double res1 = distorted[1].value() - target_y;
+            if (res0 * res0 + res1 * res1 < tol * tol) {
+                break;
+            }
+
+            const double J00 = distorted[0].derivatives()[0];
+            const double J01 = distorted[0].derivatives()[1];
+            const double J10 = distorted[1].derivatives()[0];
+            const double J11 = distorted[1].derivatives()[1];
+            const double det = J00 * J11 - J01 * J10;
+            if (std::abs(det) < 1e-30) {
+                break;
+            }
+            const double inv_det = 1.0 / det;
+            sx -= inv_det * (J11 * res0 - J01 * res1);
+            sy -= inv_det * (-J10 * res0 + J00 * res1);
+        }
+
+        Vec3<double> ray = stereographic_to_unit_ray(sx, sy);
+        O[i * 3 + 0] = ray[0];
+        O[i * 3 + 1] = ray[1];
+        O[i * 3 + 2] = ray[2];
+    }
+
+    return out;
+}
+
+static py::array_t<double> project_stereographic_splined_pywrapper(
+    lensboy::StereographicSplinedModelDefinition& model_config,
+    lensboy::StereographicSplinedIntrinsicsParameters& intrinsics,
+    py::array_t<double, py::array::c_style | py::array::forcecast>
+        points_in_camera
+) {
+    auto dxb = intrinsics.dx_grid.request();
+    auto dyb = intrinsics.dy_grid.request();
+    require(
+        (uint32_t)dxb.shape[0] == model_config.num_knots_y &&
+            (uint32_t)dxb.shape[1] == model_config.num_knots_x,
+        "dx_grid must have shape (num_knots_y, num_knots_x)"
+    );
+    require(
+        (uint32_t)dyb.shape[0] == model_config.num_knots_y &&
+            (uint32_t)dyb.shape[1] == model_config.num_knots_x,
+        "dy_grid must have shape (num_knots_y, num_knots_x)"
+    );
+
+    auto pb = points_in_camera.request();
+    require(pb.ndim == 2, "points_in_camera must be a 2D numpy array");
+    require(pb.shape[1] == 3, "points_in_camera must have shape (N, 3)");
+
+    const ssize_t N = pb.shape[0];
+    const double* params = static_cast<const double*>(
+        intrinsics.stereographic_parameters.request().ptr
+    );
+    const double* dxp = static_cast<const double*>(dxb.ptr);
+    const double* dyp = static_cast<const double*>(dyb.ptr);
+    const double* P = static_cast<const double*>(pb.ptr);
+
+    py::array_t<double> out({N, (ssize_t)2});
+    auto ob = out.request();
+    auto* O = static_cast<double*>(ob.ptr);
+
+    py::gil_scoped_release release;
+    for (ssize_t i = 0; i < N; ++i) {
+        Vec3<double> p(P[i * 3 + 0], P[i * 3 + 1], P[i * 3 + 2]);
+        Vec2<double> r;
+        project_stereographic_splined<double>(
+            &model_config,
+            params,
+            dxp,
+            dyp,
+            p,
+            r
+        );
+        O[i * 2 + 0] = r[0];
+        O[i * 2 + 1] = r[1];
+    }
+
+    return out;
+}
+
+static py::array_t<double> normalize_stereographic_splined_points(
+    lensboy::StereographicSplinedModelDefinition& model_config,
+    lensboy::StereographicSplinedIntrinsicsParameters& intrinsics,
+    py::array_t<double, py::array::c_style | py::array::forcecast> pixel_coords
+) {
+    using Jet = ceres::Jet<double, 2>;
+
+    auto dxb = intrinsics.dx_grid.request();
+    auto dyb = intrinsics.dy_grid.request();
+    require(
+        (uint32_t)dxb.shape[0] == model_config.num_knots_y &&
+            (uint32_t)dxb.shape[1] == model_config.num_knots_x,
+        "dx_grid must have shape (num_knots_y, num_knots_x)"
+    );
+    require(
+        (uint32_t)dyb.shape[0] == model_config.num_knots_y &&
+            (uint32_t)dyb.shape[1] == model_config.num_knots_x,
+        "dy_grid must have shape (num_knots_y, num_knots_x)"
+    );
+
+    auto params_buf = intrinsics.stereographic_parameters.request();
+    require(
+        params_buf.ndim == 1 && params_buf.shape[0] == 4,
+        "stereographic_parameters must have shape (4,)"
+    );
+    const double* params = static_cast<const double*>(params_buf.ptr);
+    const double fx = params[0], fy = params[1], cx = params[2], cy = params[3];
+    require(fx != 0.0 && fy != 0.0, "fx/fy must be non-zero");
+
+    const double* dxp = static_cast<const double*>(dxb.ptr);
+    const double* dyp = static_cast<const double*>(dyb.ptr);
+    const StereographicSplineMap map(model_config);
+
+    auto pb = pixel_coords.request();
+    require(pb.ndim == 2, "pixel_coords must be a 2D numpy array");
+    require(pb.shape[1] == 2, "pixel_coords must have shape (N, 2)");
+    const ssize_t N = pb.shape[0];
+    const double* P = static_cast<const double*>(pb.ptr);
+
+    py::array_t<double> out({N, (ssize_t)3});
+    auto ob = out.request();
+    double* O = static_cast<double*>(ob.ptr);
+
+    constexpr int max_rebuilds = 25;
+    constexpr int max_newton = 50;
+    constexpr double tol_sq = 1e-20;
+
+    for (ssize_t i = 0; i < N; i++) {
+        const double target_u = P[i * 2 + 0];
+        const double target_v = P[i * 2 + 1];
+        double sx = (target_u - cx) / fx;
+        double sy = (target_v - cy) / fy;
+
+        for (int rebuild = 0; rebuild < max_rebuilds; rebuild++) {
+            double gx, gy;
+            map.stereo_to_grid_coords(sx, sy, gx, gy);
+            const int ix0 = static_cast<int>(std::floor(gx));
+            const int iy0 = static_cast<int>(std::floor(gy));
+
+            double local_dx[16], local_dy[16];
+            int kidx = 0;
+            for (int b = 0; b < 4; b++) {
+                const int yy = clamp_int(iy0 + b - 1, 0, map.Ny - 1);
+                for (int a = 0; a < 4; a++) {
+                    const int xx = clamp_int(ix0 + a - 1, 0, map.Nx - 1);
+                    local_dx[kidx] = dxp[yy * map.Nx + xx];
+                    local_dy[kidx] = dyp[yy * map.Nx + xx];
+                    kidx++;
+                }
+            }
+
+            for (int iter = 0; iter < max_newton; iter++) {
+                Jet jsx(sx, 0);
+                Jet jsy(sy, 1);
+                Jet jgx, jgy;
+                map.stereo_to_grid_coords(jsx, jsy, jgx, jgy);
+                Jet ju = jgx - Jet(static_cast<double>(ix0));
+                Jet jv = jgy - Jet(static_cast<double>(iy0));
+
+                Jet wx[4], wy[4];
+                cubic_bspline_basis_uniform(ju, wx);
+                cubic_bspline_basis_uniform(jv, wy);
+
+                Jet dx_val(0.0), dy_val(0.0);
+                int ki = 0;
+                for (int b = 0; b < 4; b++) {
+                    for (int a = 0; a < 4; a++) {
+                        Jet w = wy[b] * wx[a];
+                        dx_val += Jet(local_dx[ki]) * w;
+                        dy_val += Jet(local_dy[ki]) * w;
+                        ki++;
+                    }
+                }
+
+                Jet r0 = Jet(fx) * (jsx + dx_val) + Jet(cx) - Jet(target_u);
+                Jet r1 = Jet(fy) * (jsy + dy_val) + Jet(cy) - Jet(target_v);
+                const double res0 = r0.a;
+                const double res1 = r1.a;
+                if (res0 * res0 + res1 * res1 < tol_sq) {
+                    break;
+                }
+
+                const double J00 = r0.v[0], J01 = r0.v[1];
+                const double J10 = r1.v[0], J11 = r1.v[1];
+                const double det = J00 * J11 - J01 * J10;
+                if (std::abs(det) < 1e-30) {
+                    break;
+                }
+                const double inv_det = 1.0 / det;
+                sx -= inv_det * (J11 * res0 - J01 * res1);
+                sy -= inv_det * (-J10 * res0 + J00 * res1);
+            }
+
+            double new_gx, new_gy;
+            map.stereo_to_grid_coords(sx, sy, new_gx, new_gy);
+            if (static_cast<int>(std::floor(new_gx)) == ix0 &&
+                static_cast<int>(std::floor(new_gy)) == iy0) {
+                break;
+            }
+        }
+
+        Vec3<double> ray = stereographic_to_unit_ray(sx, sy);
+        O[i * 3 + 0] = ray[0];
+        O[i * 3 + 1] = ray[1];
+        O[i * 3 + 2] = ray[2];
     }
 
     return out;

@@ -63,3 +63,60 @@ def test_opencv_serialization_round_trip(tmp_path: Path) -> None:
         original.normalize_points(pts),
         loaded.normalize_points(pts),
     )
+
+
+def test_stereographic_opencv_serialization_round_trip(tmp_path: Path) -> None:
+    """StereographicOpenCV survives a save/load cycle."""
+    original = lb.StereographicOpenCV(
+        image_width=640,
+        image_height=480,
+        fx=300.0,
+        fy=301.0,
+        cx=320.0,
+        cy=240.0,
+        distortion_coeffs=np.array([0.01, -0.001, 0.0, 0.0, 0.0001]),
+    )
+    original.save(tmp_path / "stereo_opencv.json")
+    loaded = lb.StereographicOpenCV.load(tmp_path / "stereo_opencv.json")
+
+    rays = np.array([[0.0, 0.0, 1.0], [0.5, 0.1, 0.8], [0.8, -0.1, -0.2]])
+    pts = original.project_points(rays)
+
+    np.testing.assert_array_equal(original.project_points(rays), loaded.project_points(rays))
+    np.testing.assert_array_equal(
+        original.normalize_points(pts),
+        loaded.normalize_points(pts),
+    )
+
+
+def test_stereographic_spline_serialization_round_trip(tmp_path: Path) -> None:
+    """StereographicSplined survives a save/load cycle."""
+    dx = np.zeros((8, 12), dtype=np.float64)
+    dy = np.zeros((8, 12), dtype=np.float64)
+    dx[3, 4] = 0.001
+    dy[4, 5] = -0.001
+    original = lb.StereographicSplined(
+        image_width=640,
+        image_height=480,
+        fx=300.0,
+        fy=301.0,
+        cx=320.0,
+        cy=240.0,
+        dx_grid=dx,
+        dy_grid=dy,
+        num_knots_x=12,
+        num_knots_y=8,
+        fov_deg_x=220.0,
+        fov_deg_y=180.0,
+    )
+    original.save(tmp_path / "stereo_spline.json")
+    loaded = lb.StereographicSplined.load(tmp_path / "stereo_spline.json")
+
+    rays = np.array([[0.0, 0.0, 1.0], [0.5, 0.1, 0.8], [0.8, -0.1, -0.2]])
+    pts = original.project_points(rays)
+
+    np.testing.assert_array_equal(original.project_points(rays), loaded.project_points(rays))
+    np.testing.assert_array_equal(
+        original.normalize_points(pts),
+        loaded.normalize_points(pts),
+    )

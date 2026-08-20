@@ -1,6 +1,7 @@
 #include <ceres/jet.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <unsupported/Eigen/AutoDiff>
 
 #include <algorithm>
 #include <array>
@@ -360,40 +361,38 @@ static void refine_opencv(
     double& normalized_y,
     const double* intrinsics  // fx, fy, cx, cy, dist[14]
 ) {
-    using Jet = ceres::Jet<double, 2>;
+    using Dual = Eigen::AutoDiffScalar<Eigen::Vector2d>;
     constexpr int max_iterations = 20;
     constexpr double tolerance_squared = 1e-14;
 
-    // Convert intrinsics to Jet constants (only normalized_x, normalized_y are
-    // variables)
-    std::array<Jet, 18> jet_intrinsics;
+    std::array<Dual, 18> dual_intrinsics;
     for (int i = 0; i < 18; i++) {
-        jet_intrinsics[i] = Jet(intrinsics[i]);
+        dual_intrinsics[i] = Dual(intrinsics[i]);
     }
 
     for (int iteration = 0; iteration < max_iterations; iteration++) {
-        Jet jet_normalized_x(normalized_x, 0);
-        Jet jet_normalized_y(normalized_y, 1);
-        Jet jet_pixel_x, jet_pixel_y;
+        Dual dual_normalized_x(normalized_x, 2, 0);
+        Dual dual_normalized_y(normalized_y, 2, 1);
+        Dual pixel_x, pixel_y;
         forward_opencv(
-            jet_normalized_x,
-            jet_normalized_y,
-            jet_intrinsics.data(),
-            jet_pixel_x,
-            jet_pixel_y
+            dual_normalized_x,
+            dual_normalized_y,
+            dual_intrinsics.data(),
+            pixel_x,
+            pixel_y
         );
 
-        double residual_x = jet_pixel_x.a - target_pixel_x;
-        double residual_y = jet_pixel_y.a - target_pixel_y;
+        double residual_x = pixel_x.value() - target_pixel_x;
+        double residual_y = pixel_y.value() - target_pixel_y;
         if (residual_x * residual_x + residual_y * residual_y <
             tolerance_squared) {
             break;
         }
 
-        double jacobian_x_x = jet_pixel_x.v[0];
-        double jacobian_x_y = jet_pixel_x.v[1];
-        double jacobian_y_x = jet_pixel_y.v[0];
-        double jacobian_y_y = jet_pixel_y.v[1];
+        double jacobian_x_x = pixel_x.derivatives()[0];
+        double jacobian_x_y = pixel_x.derivatives()[1];
+        double jacobian_y_x = pixel_y.derivatives()[0];
+        double jacobian_y_y = pixel_y.derivatives()[1];
         double determinant =
             jacobian_x_x * jacobian_y_y - jacobian_x_y * jacobian_y_x;
         if (std::abs(determinant) < 1e-30) {
