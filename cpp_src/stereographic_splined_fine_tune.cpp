@@ -485,7 +485,7 @@ py::dict fine_tune_stereographic_splined(
     }
     options.minimizer_progress_to_stdout = false;
 
-    constexpr int max_rebuilds = 1000;
+    constexpr int max_rebuilds = 20;
     std::vector<double*> knot_blocks;
     std::vector<ObservationRecord> obs_records;
     ceres::Solver::Summary last_summary;
