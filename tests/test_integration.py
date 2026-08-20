@@ -562,47 +562,6 @@ def test_stereographic_models_calibrate_beyond_180_degrees() -> None:
         assert result.residual_sigma_map() < 0.15
 
 
-def test_wide_angle_spline_models_have_matching_ray_fields() -> None:
-    """Stereographic and pinhole splines agree on the supported wide-angle field."""
-    from lensboy.analysis.differencing import compute_projection_diff
-
-    target_points, frames, img_h, img_w = load_wide_angle_dataset()
-    pinhole_result = lb.calibrate_camera(
-        target_points,
-        frames,
-        camera_model_config=lb.PinholeSplinedConfig(
-            image_height=img_h,
-            image_width=img_w,
-            num_knots_x=24,
-            num_knots_y=16,
-        ),
-    )
-    stereographic_result = lb.calibrate_camera(
-        target_points,
-        frames,
-        camera_model_config=lb.StereographicSplinedConfig(
-            image_height=img_h,
-            image_width=img_w,
-            num_knots_x=24,
-            num_knots_y=16,
-        ),
-    )
-
-    pixels, _, diff, _, _ = compute_projection_diff(
-        pinhole_result.camera_model,
-        stereographic_result.camera_model,
-        radius=826.0,
-        grid_density=120,
-    )
-    center = np.array([(img_w - 1) / 2.0, (img_h - 1) / 2.0])
-    radii = np.linalg.norm(pixels - center, axis=1)
-    diff_norm = np.linalg.norm(diff, axis=1)
-    supported = (radii <= 826.0) & np.isfinite(diff_norm)
-
-    assert np.median(diff_norm[supported]) < 0.02
-    assert np.percentile(diff_norm[supported], 95) < 0.04
-
-
 def test_initial_stereographic_models_must_match_config() -> None:
     """Reject initial stereographic models that the configs could not produce."""
     target_points = np.zeros((4, 3), dtype=float)

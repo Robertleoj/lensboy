@@ -752,9 +752,16 @@ def _solve_pnp_all_frames_with_model(
         normalized_points_in_camera = model.normalize_points(
             frame.detected_points_in_image
         )
-        z = normalized_points_in_camera[:, 2:3]
+        pnp_mask = normalized_points_in_camera[:, 2] > 0.0
+        if np.count_nonzero(pnp_mask) < 4:
+            cameras_from_target.append(Pose.identity())
+            solved.append(False)
+            continue
+
+        pnp_rays = normalized_points_in_camera[pnp_mask]
+        z = pnp_rays[:, 2:3]
         normalized_xy = np.ascontiguousarray(
-            normalized_points_in_camera[:, :2] / z,
+            pnp_rays[:, :2] / z,
             dtype=np.float64,
         )
 
@@ -764,7 +771,7 @@ def _solve_pnp_all_frames_with_model(
             continue
 
         success, rvec, tvec = cv2.solvePnP(
-            obj_pts,
+            obj_pts[pnp_mask],
             normalized_xy,
             normalized_K,
             zero_distortion,
@@ -1037,19 +1044,23 @@ def _make_warp_coordinates(target_points: np.ndarray) -> WarpCoordinates | None:
 
 
 def _recover_failed_pnp(
-    optimize_fn: Callable[[_OptimizationBatch[OpenCV]], _OptimizationBatch[OpenCV]],
-    initial_intrinsics: OpenCV,
+    optimize_fn: Callable[
+        [_OptimizationBatch[IntrinsicsT]], _OptimizationBatch[IntrinsicsT]
+    ],
+    solve_pnp_fn: Callable[[IntrinsicsT], tuple[list[Pose], list[bool], float]],
+    initial_intrinsics: IntrinsicsT,
     initial_poses: list[Pose],
     pnp_solved: list[bool],
     target_points: np.ndarray,
     frames: list[Frame],
     image_width: int,
     image_height: int,
-) -> tuple[OpenCV, list[Pose | None], list[np.ndarray | None]]:
+) -> tuple[IntrinsicsT, list[Pose | None], list[np.ndarray | None]]:
     """Fit a subsampled model and re-run PnP to recover initially failed frames.
 
     Args:
         optimize_fn: Optimizer callback.
+        solve_pnp_fn: Callback that re-estimates every frame pose from a model.
         initial_intrinsics: Intrinsics from first PnP pass.
         initial_poses: Poses from first PnP pass (identity for failed frames).
         pnp_solved: Per-frame success mask from first PnP pass.
@@ -1082,12 +1093,7 @@ def _recover_failed_pnp(
     )
     model = result.intrinsics
     log("Re-running PnP with optimized model...")
-    re_poses, re_solved, _ = _solve_pnp_all_frames(
-        model.K(),
-        target_points,
-        frames,
-        model.distortion_coeffs,
-    )
+    re_poses, re_solved, _ = solve_pnp_fn(model)
     n_re_solved = sum(re_solved)
     log(f"Re-PnP solved {n_re_solved}/{len(frames)} frames")
 
@@ -1148,6 +1154,12 @@ def _opencv_calibrate(
     if n_failed > 0:
         initial_intrinsics, poses, inlier_masks = _recover_failed_pnp(
             optimize_fn,
+            lambda model: _solve_pnp_all_frames(
+                model.K(),
+                target_points,
+                frames,
+                model.distortion_coeffs,
+            ),
             initial_intrinsics,
             initial_poses,
             pnp_solved,
@@ -1245,6 +1257,23 @@ def _calibrate_stereographic_opencv(
             config,
             target_points,
             warp_coordinates,
+        )
+
+    if n_failed > 0:
+        initial_intrinsics, poses, inlier_masks = _recover_failed_pnp(
+            optimize_fn,
+            lambda model: _solve_pnp_all_frames_with_model(
+                model,
+                target_points,
+                frames,
+            ),
+            initial_intrinsics,
+            initial_poses,
+            pnp_solved,
+            target_points,
+            frames,
+            config.image_width,
+            config.image_height,
         )
 
     state = _run_with_outlier_filtering(
@@ -1380,27 +1409,6 @@ def _stereographic_splined_refine_inner(
         ],
         frames=batch.frames,
         warp_coeffs=out_coeffs,
-    )
-
-
-def _compute_fov_from_opencv(
-    opencv_model: OpenCV,
-    padding_fraction: float = 0.05,
-    max_fov_deg: float = 175.0,
-) -> tuple[float, float]:
-    """Compute the spline FOV from an OpenCV model with percentage padding.
-
-    Args:
-        opencv_model: Seed OpenCV camera model.
-        padding_fraction: Fractional padding to add to each FOV axis.
-        max_fov_deg: Maximum allowed FOV to avoid singularities near 180 degrees.
-
-    Returns:
-        Padded (fov_deg_x, fov_deg_y), capped at max_fov_deg.
-    """
-    return (
-        min(opencv_model.fov_deg_x * (1 + padding_fraction), max_fov_deg),
-        min(opencv_model.fov_deg_y * (1 + padding_fraction), max_fov_deg),
     )
 
 
@@ -1570,128 +1578,172 @@ def _compute_spline_grid_fov_from_unit_ray_model(
     return min(fov_x, max_fov_deg), min(fov_y, max_fov_deg)
 
 
-def _fit_opencv_seed(
+def _compute_spline_fov_from_seed_coverage(
+    seed_model: StereographicOpenCV,
+    cameras_from_target: list[Pose],
+    pnp_solved_mask: list[bool],
     target_points: np.ndarray,
     frames: list[Frame],
-    config: PinholeSplinedConfig,
-) -> tuple[CalibrationResult[OpenCV], list[int]]:
-    """Fit an OpenCV seed model on a coverage-subsampled set of frames.
+    max_fov_deg: float,
+) -> tuple[float, float]:
+    """Compute grid support from the raw seed border and observed target rays.
+
+    Args:
+        seed_model: Distortion-free stereographic seed.
+        cameras_from_target: Camera-from-target transforms from seed-model PnP.
+        pnp_solved_mask: Per-frame PnP success mask.
+        target_points: 3D target points, shape (N, 3).
+        frames: All calibration frames.
+        max_fov_deg: Maximum grid FOV on either axis.
+
+    Returns:
+        Grid FOV covering both the seed image border and observed target rays.
+    """
+    fov_x, fov_y = _compute_spline_grid_fov_from_unit_ray_model(
+        seed_model,
+        max_fov_deg=max_fov_deg,
+    )
+    stereographic_points: list[np.ndarray] = []
+    for frame, camera_from_target, solved in zip(
+        frames,
+        cameras_from_target,
+        pnp_solved_mask,
+    ):
+        if not solved:
+            continue
+        points_in_camera = camera_from_target.apply(
+            target_points[frame.target_point_indices]
+        )
+        rays = points_in_camera / np.linalg.norm(points_in_camera, axis=1, keepdims=True)
+        denominator = 1.0 + rays[:, 2:3]
+        stereographic_points.append(2.0 * rays[:, :2] / denominator)
+
+    if not stereographic_points:
+        return fov_x, fov_y
+
+    coverage = np.concatenate(stereographic_points)
+    tolerance = 1.03
+    half_x = float(np.max(np.abs(coverage[:, 0]))) * tolerance
+    half_y = float(np.max(np.abs(coverage[:, 1]))) * tolerance
+    coverage_fov_x = float(np.degrees(4.0 * np.arctan(half_x / 2.0)))
+    coverage_fov_y = float(np.degrees(4.0 * np.arctan(half_y / 2.0)))
+    return (
+        min(max(fov_x, coverage_fov_x), max_fov_deg),
+        min(max(fov_y, coverage_fov_y), max_fov_deg),
+    )
+
+
+def _fit_stereographic_seed(
+    target_points: np.ndarray,
+    frames: list[Frame],
+    config: PinholeSplinedConfig | StereographicSplinedConfig,
+) -> CalibrationResult[StereographicOpenCV]:
+    """Fit one distortion-free stereographic seed on coverage-selected frames.
 
     Args:
         target_points: 3D target points, shape (N, 3).
         frames: All calibration frames.
-        config: Spline config (used for image size and initial focal length).
+        config: Spline config used for the image size and initial focal length.
 
     Returns:
-        Tuple of (calibration result, indices of subsampled frames).
+        Distortion-free stereographic calibration result.
     """
     start_time = default_timer()
-    sub_indices = _select_covering_frames(
+    seed_indices = _select_covering_frames(
         frames,
         config.image_width,
         config.image_height,
         max_frames=SEED_FIT_MAX_FRAMES,
     )
-    subsampled_frames = [frames[i] for i in sub_indices]
-
-    opencv_config = OpenCVConfig(
-        image_height=config.image_height,
-        image_width=config.image_width,
-        initial_focal_length=config.initial_focal_length,
-        included_distortion_coefficients=OpenCVConfig.FULL_14,
-    )
-
-    disable_logs()
-    try:
-        result = _opencv_calibrate(
-            target_points,
-            subsampled_frames,
-            opencv_config,
-            None,
-            estimate_target_warp=False,
-        )
-    finally:
-        enable_logs()
-    fov_x, fov_y = _compute_fov_from_opencv(result.camera_model, padding_fraction=0.0)
-    log(
-        f"Fitted OpenCV seed model: {default_timer() - start_time:.1f}s "
-        f"(FOV: {fov_x:.1f}° x {fov_y:.1f}°)"
-    )
-    return result, sub_indices
-
-
-def _estimate_spline_fov(
-    frames: list[Frame],
-    sub_indices: list[int],
-    target_points: np.ndarray,
-    config: PinholeSplinedConfig | StereographicSplinedConfig,
-    max_fov_deg: float = 175.0,
-) -> tuple[float, float]:
-    """Estimate the spline FOV from a raw stereographic fit.
-
-    Args:
-        frames: All calibration frames.
-        sub_indices: Indices of subsampled frames used for the seed model.
-        target_points: 3D target points, shape (N, 3).
-        config: Spline config.
-        max_fov_deg: Maximum spline-grid FOV on either axis.
-
-    Returns:
-        Estimated (fov_deg_x, fov_deg_y) for the full spline model.
-    """
-    sub_frames = [frames[i] for i in sub_indices]
-    stereographic_config = StereographicOpenCVConfig(
+    seed_frames = [frames[index] for index in seed_indices]
+    seed_config = StereographicOpenCVConfig(
         image_height=config.image_height,
         image_width=config.image_width,
         initial_focal_length=config.initial_focal_length,
         included_distortion_coefficients=StereographicOpenCVConfig.NONE,
     )
 
-    start_time = default_timer()
     disable_logs()
     try:
-        stereographic_result = _calibrate_stereographic_opencv(
+        result = _calibrate_stereographic_opencv(
             target_points,
-            sub_frames,
-            stereographic_config,
+            seed_frames,
+            seed_config,
             None,
             estimate_target_warp=False,
         )
     finally:
         enable_logs()
-
-    fov_deg_x, fov_deg_y = _compute_spline_grid_fov_from_unit_ray_model(
-        stereographic_result.camera_model,
-        max_fov_deg=max_fov_deg,
+    fov_x, fov_y = _compute_spline_grid_fov_from_unit_ray_model(
+        result.camera_model,
+        max_fov_deg=220.0,
     )
     log(
-        f"Spline FOV estimate from raw stereographic fit: "
+        f"Fitted distortion-free stereographic seed model: "
         f"{default_timer() - start_time:.1f}s "
-        f"({fov_deg_x:.1f}° x {fov_deg_y:.1f}°)"
+        f"(FOV: {fov_x:.1f}° x {fov_y:.1f}°)"
     )
-    return fov_deg_x, fov_deg_y
+    return result
+
+
+def _prepare_spline_frame_state(
+    all_poses_pnp: list[Pose],
+    pnp_solved_mask: list[bool],
+    frames: list[Frame],
+    target_points: np.ndarray,
+    estimate_target_warp: bool,
+) -> tuple[
+    list[Pose | None],
+    list[np.ndarray | None],
+    WarpCoordinates | None,
+]:
+    """Prepare shared per-frame and target-warp spline optimization state.
+
+    Args:
+        all_poses_pnp: Camera-from-target transforms from PnP.
+        pnp_solved_mask: Per-frame PnP success mask.
+        frames: All calibration frames.
+        target_points: 3D target points, shape (N, 3).
+        estimate_target_warp: Whether the final spline fit estimates target warp.
+
+    Returns:
+        Optional poses, initial inlier masks, and optional warp coordinates.
+    """
+    n_solved = sum(pnp_solved_mask)
+    log(f"PnP solved {n_solved}/{len(frames)} frames")
+
+    poses: list[Pose | None] = []
+    inlier_masks: list[np.ndarray | None] = []
+    for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
+        if ok:
+            poses.append(camera_from_target)
+            inlier_masks.append(np.ones(len(frame), dtype=bool))
+            continue
+        poses.append(None)
+        inlier_masks.append(None)
+
+    warp_coordinates = None
+    if estimate_target_warp:
+        warp_coordinates = _make_warp_coordinates(target_points)
+    return poses, inlier_masks, warp_coordinates
 
 
 def _build_initial_spline_model(
-    opencv_model: OpenCV,
+    seed_model: StereographicOpenCV,
     config: PinholeSplinedConfig,
     fov_deg_x: float,
     fov_deg_y: float,
-    opencv_fov_x: float,
-    opencv_fov_y: float,
 ) -> PinholeSplined:
-    """Build the initial spline model by matching the OpenCV distortion.
+    """Build a pinhole spline matching a distortion-free stereographic seed.
 
     Args:
-        opencv_model: Seed OpenCV model.
+        seed_model: Distortion-free stereographic seed.
         config: Spline config.
         fov_deg_x: Target FOV in x for the spline grid.
         fov_deg_y: Target FOV in y for the spline grid.
-        opencv_fov_x: OpenCV model's FOV in x (no padding).
-        opencv_fov_y: OpenCV model's FOV in y (no padding).
 
     Returns:
-        Initial PinholeSplined model with knots matched to the OpenCV distortion.
+        Initial model with knots matched to stereographic projection.
     """
     cpp_config = lbb.PinholeSplinedOptimizationConfig(
         config.image_width,
@@ -1703,13 +1755,11 @@ def _build_initial_spline_model(
         config.smoothness_lambda,
     )
 
-    matching_bounds_fov_x = min(fov_deg_x, opencv_fov_x)
-    matching_bounds_fov_y = min(fov_deg_y, opencv_fov_y)
-    image_bound_x = np.tan(np.deg2rad(matching_bounds_fov_x) / 2.0) * 0.8
-    image_bound_y = np.tan(np.deg2rad(matching_bounds_fov_y) / 2.0) * 0.8
+    image_bound_x = np.tan(np.deg2rad(fov_deg_x) / 2.0) * 0.8
+    image_bound_y = np.tan(np.deg2rad(fov_deg_y) / 2.0) * 0.8
 
-    out_dict = lbb.get_matching_spline_distortion_model(
-        opencv_model.distortion_coeffs.tolist(),
+    matching_fn = getattr(lbb, "get_matching_stereographic_spline_distortion_model")
+    out_dict = matching_fn(
         cpp_config,
         float(image_bound_x),
         float(image_bound_y),
@@ -1718,10 +1768,10 @@ def _build_initial_spline_model(
     return PinholeSplined(
         image_height=config.image_height,
         image_width=config.image_width,
-        fx=opencv_model.fx,
-        fy=opencv_model.fy,
-        cx=opencv_model.cx,
-        cy=opencv_model.cy,
+        fx=seed_model.fx,
+        fy=seed_model.fy,
+        cx=seed_model.cx,
+        cy=seed_model.cy,
         dx_grid=out_dict["x_knots"],
         dy_grid=out_dict["y_knots"],
         num_knots_x=config.num_knots_x,
@@ -1798,67 +1848,58 @@ def _calibrate_pinhole_splined(
     )
 
     if initial_camera_model is None:
-        # Stage 1: Fit OpenCV seed on subsampled frames
-        opencv_result, sub_indices = _fit_opencv_seed(target_points, frames, config)
-        opencv_model = opencv_result.camera_model
-
-        opencv_fov_x, opencv_fov_y = _compute_fov_from_opencv(
-            opencv_model, padding_fraction=0.0
+        seed_result = _fit_stereographic_seed(
+            target_points,
+            frames,
+            config,
+        )
+        seed_model = seed_result.camera_model
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            seed_model,
+            target_points,
+            frames,
         )
 
-        # Stage 2: Determine spline FOV
         if config.fov_deg_xy is not None:
             fov_deg_x, fov_deg_y = config.fov_deg_xy
             log(f"Spline FOV (user-specified): {fov_deg_x:.1f}° x {fov_deg_y:.1f}°")
         else:
-            fov_deg_x, fov_deg_y = _estimate_spline_fov(
-                frames,
-                sub_indices,
+            fov_deg_x, fov_deg_y = _compute_spline_fov_from_seed_coverage(
+                seed_model,
+                all_poses_pnp,
+                pnp_solved_mask,
                 target_points,
-                config,
+                frames,
+                max_fov_deg=175.0,
+            )
+            log(
+                f"Spline FOV from seed: {fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
             )
 
-        # Stage 3: Build full spline model
         prior_model = _build_initial_spline_model(
-            opencv_model,
+            seed_model,
             config,
             fov_deg_x,
             fov_deg_y,
-            opencv_fov_x,
-            opencv_fov_y,
         )
 
-        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames(
-            opencv_model.K(),
-            target_points,
-            frames,
-            dist_coeffs=opencv_model.distortion_coeffs,
-        )
     else:
         prior_model = initial_camera_model
         log("Using user-provided initial spline model")
+        seed_result = _fit_stereographic_seed(target_points, frames, config)
         all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
-            prior_model,
+            seed_result.camera_model,
             target_points,
             frames,
         )
 
-    n_solved = sum(pnp_solved_mask)
-    log(f"PnP solved {n_solved}/{len(frames)} frames")
-
-    poses: list[Pose | None] = []
-    inlier_masks: list[np.ndarray | None] = []
-    for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
-        if ok:
-            poses.append(camera_from_target)
-            inlier_masks.append(np.ones(len(frame), dtype=bool))
-            continue
-        poses.append(None)
-        inlier_masks.append(None)
-
-    warp_coordinates = None
-    if estimate_target_warp:
-        warp_coordinates = _make_warp_coordinates(target_points)
+    poses, inlier_masks, warp_coordinates = _prepare_spline_frame_state(
+        all_poses_pnp,
+        pnp_solved_mask,
+        frames,
+        target_points,
+        estimate_target_warp,
+    )
 
     def optimize_fn(
         batch: _OptimizationBatch[PinholeSplined],
@@ -1922,20 +1963,17 @@ def _calibrate_stereographic_splined(
     )
 
     if initial_camera_model is None:
-        seed_config = StereographicOpenCVConfig(
-            image_height=config.image_height,
-            image_width=config.image_width,
-            initial_focal_length=config.initial_focal_length,
-            included_distortion_coefficients=StereographicOpenCVConfig.FULL_14,
-        )
-        seed_result = _calibrate_stereographic_opencv(
+        seed_result = _fit_stereographic_seed(
             target_points,
             frames,
-            seed_config,
-            outlier_threshold_stddevs,
-            estimate_target_warp,
+            config,
         )
         seed_model = seed_result.camera_model
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            seed_model,
+            target_points,
+            frames,
+        )
         if config.fov_deg_xy is not None:
             fov_deg_x, fov_deg_y = config.fov_deg_xy
             log(
@@ -1943,21 +1981,16 @@ def _calibrate_stereographic_splined(
                 f"{fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
             )
         else:
-            fov_sub_indices = _select_covering_frames(
-                frames,
-                config.image_width,
-                config.image_height,
-                max_frames=SEED_FIT_MAX_FRAMES,
-            )
-            fov_deg_x, fov_deg_y = _estimate_spline_fov(
-                frames,
-                fov_sub_indices,
+            fov_deg_x, fov_deg_y = _compute_spline_fov_from_seed_coverage(
+                seed_model,
+                all_poses_pnp,
+                pnp_solved_mask,
                 target_points,
-                config,
+                frames,
                 max_fov_deg=220.0,
             )
             log(
-                f"Stereographic spline FOV estimate from raw fit: "
+                f"Stereographic spline FOV from seed: "
                 f"{fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
             )
         model = _build_initial_stereographic_spline_model(
@@ -1966,38 +1999,23 @@ def _calibrate_stereographic_splined(
             fov_deg_x,
             fov_deg_y,
         )
-        poses = list(seed_result.cameras_from_target)
-        inlier_masks = []
-        for frame_diagnostics in seed_result.frame_diagnostics:
-            if frame_diagnostics is None:
-                inlier_masks.append(None)
-                continue
-            inlier_masks.append(frame_diagnostics.inlier_mask)
-        warp_coordinates = None
-        warp_coeffs = None
-        if seed_result.target_warp is not None:
-            warp_coordinates = seed_result.target_warp.warp_coordinates
-            warp_coeffs = seed_result.target_warp.object_warp
     else:
         model = initial_camera_model
+        seed_result = _fit_stereographic_seed(target_points, frames, config)
         all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
-            model,
+            seed_result.camera_model,
             target_points,
             frames,
         )
-        poses = []
-        inlier_masks = []
-        for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
-            if ok:
-                poses.append(camera_from_target)
-                inlier_masks.append(np.ones(len(frame), dtype=bool))
-                continue
-            poses.append(None)
-            inlier_masks.append(None)
-        warp_coordinates = None
-        if estimate_target_warp:
-            warp_coordinates = _make_warp_coordinates(target_points)
-        warp_coeffs = None
+
+    poses, inlier_masks, warp_coordinates = _prepare_spline_frame_state(
+        all_poses_pnp,
+        pnp_solved_mask,
+        frames,
+        target_points,
+        estimate_target_warp,
+    )
+    warp_coeffs = None
 
     def optimize_fn(
         batch: _OptimizationBatch[StereographicSplined],

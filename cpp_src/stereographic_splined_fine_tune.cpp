@@ -15,6 +15,7 @@
 #include "./cameramodels.hpp"
 #include "./ceres_geometry.hpp"
 #include "./pybind_utils.hpp"
+#include "./splined_fine_tune_utils.hpp"
 #include "./type_defs.hpp"
 
 namespace lensboy {
@@ -235,25 +236,6 @@ struct ReprojectionErrorStereographicSplinedNoWarp {
     }
 };
 
-struct StereographicKnotSmoothness2D {
-    double weight;
-
-    template <typename T>
-    bool operator()(
-        const T* const a,
-        const T* const b,
-        const T* const c,
-        const T* const d,
-        T* residuals
-    ) const {
-        residuals[0] =
-            T(weight) * (-a[0] + T(3.0) * b[0] - T(3.0) * c[0] + d[0]);
-        residuals[1] =
-            T(weight) * (-a[1] + T(3.0) * b[1] - T(3.0) * c[1] + d[1]);
-        return true;
-    }
-};
-
 struct StereographicObservationRecord {
     size_t cam_idx;
     int pt_idx;
@@ -275,60 +257,6 @@ static bool any_cell_changed(
         }
     }
     return false;
-}
-
-static void add_grid_smoothness(
-    ceres::Problem& problem,
-    const std::vector<double*>& knot_blocks,
-    int nx,
-    int ny,
-    double weight
-) {
-    for (int y = 0; y < ny; y++) {
-        for (int x = 0; x + 3 < nx; x++) {
-            const int k0 = y * nx + x;
-            const int k1 = y * nx + x + 1;
-            const int k2 = y * nx + x + 2;
-            const int k3 = y * nx + x + 3;
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<
-                    StereographicKnotSmoothness2D,
-                    2,
-                    2,
-                    2,
-                    2,
-                    2>(new StereographicKnotSmoothness2D{weight}),
-                nullptr,
-                knot_blocks[k0],
-                knot_blocks[k1],
-                knot_blocks[k2],
-                knot_blocks[k3]
-            );
-        }
-    }
-
-    for (int y = 0; y + 3 < ny; y++) {
-        for (int x = 0; x < nx; x++) {
-            const int k0 = y * nx + x;
-            const int k1 = (y + 1) * nx + x;
-            const int k2 = (y + 2) * nx + x;
-            const int k3 = (y + 3) * nx + x;
-            problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<
-                    StereographicKnotSmoothness2D,
-                    2,
-                    2,
-                    2,
-                    2,
-                    2>(new StereographicKnotSmoothness2D{weight}),
-                nullptr,
-                knot_blocks[k0],
-                knot_blocks[k1],
-                knot_blocks[k2],
-                knot_blocks[k3]
-            );
-        }
-    }
 }
 
 static void build_problem(
@@ -366,6 +294,37 @@ static void build_problem(
     for (auto& cam : cameras_from_target) {
         problem.AddParameterBlock(const_cast<double*>(cam.data()), 6);
     }
+
+    auto add_spline_anchor = [&](double x_stereo,
+                                 double y_stereo,
+                                 bool constrain_dx,
+                                 bool constrain_dy,
+                                 double weight) {
+        double gx, gy;
+        map.stereo_to_grid_coords(x_stereo, y_stereo, gx, gy);
+        add_spline_anchor_at_grid(
+            problem,
+            map,
+            knot_blocks,
+            gx,
+            gy,
+            constrain_dx,
+            constrain_dy,
+            weight
+        );
+    };
+
+    constexpr double anchor_weight = 1000.0;
+    add_spline_anchor(0.0, 0.0, true, true, anchor_weight);
+    const double fov_rad_x = cfg.fov_deg_x * M_PI / 180.0;
+    const double quarter_x_stereo = 2.0 * std::tan(fov_rad_x / 8.0);
+    add_spline_anchor(
+        quarter_x_stereo,
+        0.0,
+        false,
+        true,
+        anchor_weight
+    );
 
     obs_records.clear();
     for (size_t cam_idx = 0; cam_idx < frames.size(); cam_idx++) {
@@ -430,9 +389,13 @@ static void build_problem(
         }
     }
 
-    if (smoothness_weight > 0.0) {
-        add_grid_smoothness(problem, knot_blocks, nx, ny, smoothness_weight);
-    }
+    add_grid_smoothness(
+        problem,
+        knot_blocks,
+        nx,
+        ny,
+        smoothness_weight
+    );
 }
 
 py::dict fine_tune_stereographic_splined(
@@ -485,7 +448,6 @@ py::dict fine_tune_stereographic_splined(
 
     const StereographicSplineMap map(model_config);
     const double smoothness_weight = std::sqrt(model_config.smoothness_lambda);
-
     ceres::Solver::Options options;
     options.num_threads =
         std::min(8, static_cast<int>(std::thread::hardware_concurrency()));

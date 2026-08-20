@@ -6,7 +6,7 @@ import collections.abc
 import numpy
 import numpy.typing
 import typing
-__all__: list[str] = ['PinholeSplinedIntrinsicsParameters', 'PinholeSplinedModelDefinition', 'PinholeSplinedOptimizationConfig', 'StereographicOpenCVModelDefinition', 'StereographicSplinedIntrinsicsParameters', 'StereographicSplinedModelDefinition', 'StereographicSplinedOptimizationConfig', 'WarpCoordinates', 'add', 'calibrate_opencv', 'calibrate_stereographic_opencv', 'fine_tune_pinhole_splined', 'fine_tune_stereographic_splined', 'get_matching_spline_distortion_model', 'get_matching_stereographic_opencv_model', 'make_undistortion_maps_pinhole_splined', 'max_cell_errors_opencv', 'max_cell_errors_pinhole_splined', 'normalize_pinhole_splined_points', 'normalize_stereographic_opencv_points', 'normalize_stereographic_splined_points', 'project_pinhole_splined_points', 'project_stereographic_opencv_points', 'project_stereographic_splined_points', 'seeded_normalize_opencv', 'seeded_normalize_splined', 'set_log_level', 'warp_target_points']
+__all__: list[str] = ['PinholeSplinedIntrinsicsParameters', 'PinholeSplinedModelDefinition', 'PinholeSplinedOptimizationConfig', 'StereographicOpenCVModelDefinition', 'StereographicSplinedIntrinsicsParameters', 'StereographicSplinedModelDefinition', 'StereographicSplinedOptimizationConfig', 'WarpCoordinates', 'add', 'calibrate_opencv', 'calibrate_stereographic_opencv', 'fine_tune_pinhole_splined', 'fine_tune_stereographic_splined', 'get_matching_spline_distortion_model', 'get_matching_stereographic_opencv_model', 'get_matching_stereographic_spline_distortion_model', 'make_undistortion_maps_pinhole_splined', 'max_cell_errors_opencv', 'max_cell_errors_pinhole_splined', 'normalize_pinhole_splined_points', 'normalize_stereographic_opencv_points', 'normalize_stereographic_splined_points', 'project_pinhole_splined_points', 'project_stereographic_opencv_points', 'project_stereographic_splined_points', 'seeded_normalize_opencv', 'seeded_normalize_splined', 'set_log_level', 'warp_target_points']
 class PinholeSplinedIntrinsicsParameters:
     def __init__(self, pinhole_parameters: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], dx_grid: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], dy_grid: typing.Annotated[numpy.typing.ArrayLike, numpy.float64]) -> None:
         ...
@@ -204,6 +204,8 @@ def fine_tune_stereographic_splined(model_config: StereographicSplinedOptimizati
 def get_matching_spline_distortion_model(opencv_distortion_params: collections.abc.Sequence[typing.SupportsFloat], model_config: PinholeSplinedOptimizationConfig, image_bound_x: typing.SupportsFloat, image_bound_y: typing.SupportsFloat) -> dict:
     ...
 def get_matching_stereographic_opencv_model(image_width: typing.SupportsInt, image_height: typing.SupportsInt, stereographic_focal_length: typing.SupportsFloat, distortion_param_optimize_mask: collections.abc.Sequence[bool]) -> dict:
+    ...
+def get_matching_stereographic_spline_distortion_model(model_config: PinholeSplinedOptimizationConfig, image_bound_x: typing.SupportsFloat, image_bound_y: typing.SupportsFloat) -> dict:
     ...
 def make_undistortion_maps_pinhole_splined(model_config: PinholeSplinedModelDefinition, intrinsics: PinholeSplinedIntrinsicsParameters, pinhole_parameters: typing.Annotated[numpy.typing.ArrayLike, numpy.float64], image_size_wh: tuple[typing.SupportsInt, typing.SupportsInt]) -> tuple:
     ...

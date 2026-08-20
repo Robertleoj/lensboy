@@ -12,6 +12,7 @@
 #include "./cameramodels.hpp"
 #include "./ceres_geometry.hpp"
 #include "./pybind_utils.hpp"
+#include "./splined_fine_tune_utils.hpp"
 #include "./type_defs.hpp"
 
 namespace lensboy {
@@ -108,28 +109,6 @@ Vec3<T> apply_target_warp_with_basis(
                  T(warp.z_hat[2]) * (wz + z_warp);
     return result;
 }
-
-// Constrains the spline correction at a fixed point to a target value.
-// Precomputed basis weights make this a simple weighted sum of 16 knots.
-struct SplineAnchor {
-    double weight;
-    double target;
-    int component;
-    double basis[16];
-
-    template <typename T>
-    bool operator()(
-        T const* const* knots,
-        T* residuals
-    ) const {
-        T val(0.0);
-        for (int i = 0; i < 16; i++) {
-            val += knots[i][component] * T(basis[i]);
-        }
-        residuals[0] = T(weight) * (val - T(target));
-        return true;
-    }
-};
 
 struct ReprojectionErrorSplinedWarp {
     const SplineMap& map;
@@ -268,23 +247,6 @@ struct ReprojectionErrorSplinedNoWarp {
     }
 };
 
-struct KnotSmoothness2D {
-    double s;
-
-    template <typename T>
-    bool operator()(
-        const T* const a,
-        const T* const b,
-        const T* const c,
-        const T* const d,
-        T* residuals
-    ) const {
-        residuals[0] = T(s) * (-a[0] + T(3.0) * b[0] - T(3.0) * c[0] + d[0]);
-        residuals[1] = T(s) * (-a[1] + T(3.0) * b[1] - T(3.0) * c[1] + d[1]);
-        return true;
-    }
-};
-
 struct ObservationRecord {
     size_t cam_idx;
     int pt_idx;
@@ -324,7 +286,7 @@ static inline void BuildProblem(
         std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>& frames,
     std::vector<double*>& knot_blocks,
     std::vector<ObservationRecord>& obs_records,
-    double sqrt_lambda
+    double smoothness_weight
 ) {
     const int normalized_x = static_cast<int>(cfg.num_knots_x);
     const int normalized_y = static_cast<int>(cfg.num_knots_y);
@@ -350,9 +312,6 @@ static inline void BuildProblem(
         problem.AddParameterBlock(const_cast<double*>(cam.data()), 6);
     }
 
-    // Spline anchor constraints to prevent the spline from absorbing
-    // global pose changes. We evaluate the spline at two fixed points in
-    // normalized coords and constrain the output.
     auto add_spline_anchor = [&](double x_n,
                                  double y_n,
                                  bool constrain_dx,
@@ -360,51 +319,16 @@ static inline void BuildProblem(
                                  double weight) {
         double gx, gy;
         map.normalized_to_grid_coords(x_n, y_n, gx, gy);
-        const int ix = static_cast<int>(gx);
-        const int iy = static_cast<int>(gy);
-
-        if (!map.is_inside_fov(ix, iy)) {
-            return;
-        }
-
-        const double u = gx - ix;
-        const double v = gy - iy;
-        double wx[4], wy[4];
-        cubic_bspline_basis_uniform(u, wx);
-        cubic_bspline_basis_uniform(v, wy);
-
-        double basis[16];
-        int idx = 0;
-        for (int b = 0; b < 4; b++) {
-            for (int a = 0; a < 4; a++) {
-                basis[idx++] = wy[b] * wx[a];
-            }
-        }
-
-        std::array<int, 16> flat{};
-        map.support_indices_4x4(ix, iy, flat);
-
-        auto make_anchor = [&](double target, int component) {
-            SplineAnchor sa{weight, target, component, {}};
-            std::copy(basis, basis + 16, sa.basis);
-            auto* cost = new ceres::DynamicAutoDiffCostFunction<SplineAnchor>(
-                new SplineAnchor(sa)
-            );
-            std::vector<double*> ptrs;
-            for (int i = 0; i < 16; i++) {
-                cost->AddParameterBlock(2);
-                ptrs.push_back(knot_blocks[flat[i]]);
-            }
-            cost->SetNumResiduals(1);
-            problem.AddResidualBlock(cost, nullptr, ptrs);
-        };
-
-        if (constrain_dx) {
-            make_anchor(0.0, 0);
-        }
-        if (constrain_dy) {
-            make_anchor(0.0, 1);
-        }
+        add_spline_anchor_at_grid(
+            problem,
+            map,
+            knot_blocks,
+            gx,
+            gy,
+            constrain_dx,
+            constrain_dy,
+            weight
+        );
     };
 
     constexpr double anchor_weight = 1000.0;
@@ -416,8 +340,6 @@ static inline void BuildProblem(
     add_spline_anchor(quarter_x_n, 0.0, false, true, anchor_weight);
 
     // reprojection residuals (wired to correct 16 knots for each observation)
-    // Track which cells contain at least one observation.
-    std::vector<bool> cell_has_obs(normalized_x * normalized_y, false);
     obs_records.clear();
     const size_t num_cams = frames.size();
     for (size_t cam_idx = 0; cam_idx < num_cams; cam_idx++) {
@@ -436,8 +358,6 @@ static inline void BuildProblem(
             if (!map.is_inside_fov(ix, iy)) {
                 continue;
             }
-
-            cell_has_obs[iy * normalized_x + ix] = true;
 
             std::array<int, 16> flat{};
             map.support_indices_4x4(ix, iy, flat);
@@ -487,58 +407,13 @@ static inline void BuildProblem(
         }
     }
 
-    // Third-derivative smoothness priors for cells without observations.
-    // For each empty cell (cx, cy), add horizontal and vertical stencils
-    // through both rows/columns of the cell's corner knots.
-    for (int cy = 0; cy < normalized_y; cy++) {
-        for (int cx = 0; cx < normalized_x; cx++) {
-            if (cell_has_obs[cy * normalized_x + cx]) {
-                continue;
-            }
-
-            // Horizontal: 4-knot stencil along rows cy and cy+1
-            if (cx - 1 >= 0 && cx + 2 < normalized_x) {
-                for (int row = cy; row <= cy + 1 && row < normalized_y; row++) {
-                    const int k0 = row * normalized_x + (cx - 1);
-                    const int k1 = row * normalized_x + cx;
-                    const int k2 = row * normalized_x + (cx + 1);
-                    const int k3 = row * normalized_x + (cx + 2);
-                    problem.AddResidualBlock(
-                        new ceres::
-                            AutoDiffCostFunction<KnotSmoothness2D, 2, 2, 2, 2, 2>(
-                                new KnotSmoothness2D{sqrt_lambda}
-                            ),
-                        nullptr,
-                        knot_blocks[k0],
-                        knot_blocks[k1],
-                        knot_blocks[k2],
-                        knot_blocks[k3]
-                    );
-                }
-            }
-
-            // Vertical: 4-knot stencil along columns cx and cx+1
-            if (cy - 1 >= 0 && cy + 2 < normalized_y) {
-                for (int col = cx; col <= cx + 1 && col < normalized_x; col++) {
-                    const int k0 = (cy - 1) * normalized_x + col;
-                    const int k1 = cy * normalized_x + col;
-                    const int k2 = (cy + 1) * normalized_x + col;
-                    const int k3 = (cy + 2) * normalized_x + col;
-                    problem.AddResidualBlock(
-                        new ceres::
-                            AutoDiffCostFunction<KnotSmoothness2D, 2, 2, 2, 2, 2>(
-                                new KnotSmoothness2D{sqrt_lambda}
-                            ),
-                        nullptr,
-                        knot_blocks[k0],
-                        knot_blocks[k1],
-                        knot_blocks[k2],
-                        knot_blocks[k3]
-                    );
-                }
-            }
-        }
-    }
+    add_grid_smoothness(
+        problem,
+        knot_blocks,
+        normalized_x,
+        normalized_y,
+        smoothness_weight
+    );
 }
 
 py::dict fine_tune_pinhole_splined(
@@ -578,8 +453,6 @@ py::dict fine_tune_pinhole_splined(
         knot_params[i] = Vec2<double>(dxp[i], dyp[i]);
     }
 
-    const double sqrt_lambda = std::sqrt(model_config.smoothness_lambda);
-
     double warp_coeffs[5] = {
         warp_coeffs_initial[0],
         warp_coeffs_initial[1],
@@ -589,6 +462,7 @@ py::dict fine_tune_pinhole_splined(
     };
 
     SplineMap map(model_config);
+    const double smoothness_weight = std::sqrt(model_config.smoothness_lambda);
 
     ceres::Solver::Options options;
 
@@ -628,7 +502,7 @@ py::dict fine_tune_pinhole_splined(
             frames,
             knot_blocks,
             obs_records,
-            sqrt_lambda
+            smoothness_weight
         );
 
         spdlog::debug(

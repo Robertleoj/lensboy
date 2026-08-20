@@ -29,8 +29,7 @@ class PinholeSplinedConfig(CameraModelConfig):
             estimate automatically from the calibration data.
         fov_deg_xy: Explicit FOV in degrees (x, y) for the spline grid. If None,
             the FOV is estimated from a distortion-free stereographic fit.
-        smoothness_lambda: Strength of the smoothness prior applied to spline
-            knots in regions without calibration data.
+        smoothness_lambda: Strength of the global third-derivative spline prior.
     """
 
     image_height: int

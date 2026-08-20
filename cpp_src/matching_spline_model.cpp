@@ -2,6 +2,7 @@
 #include <pybind11/numpy.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <functional>
 #include <vector>
 #include "./cameramodels.hpp"
 #include "./utils.hpp"
@@ -199,11 +200,11 @@ struct StereographicOpenCVError {
     double target_pixel_y;
 };
 
-py::dict get_matching_spline_distortion_model(
-    std::vector<double>& opencv_distortion_params,
+static py::dict fit_matching_spline_distortion_model(
     PinholeSplinedOptimizationConfig& model_config,
     double image_bound_x,
-    double image_bound_y
+    double image_bound_y,
+    const std::function<Vec2<double>(const Vec2<double>&)>& distort
 ) {
     const SplineMap map(model_config);
 
@@ -214,8 +215,8 @@ py::dict get_matching_spline_distortion_model(
     const double half_x_pinhole = std::tan(fov_rad_x / 2.0);
     const double half_y_pinhole = std::tan(fov_rad_y / 2.0);
 
-    const uint32_t num_samples_x = model_config.num_knots_x;
-    const uint32_t num_samples_y = model_config.num_knots_y;
+    const uint32_t num_samples_x = model_config.num_knots_x * 4;
+    const uint32_t num_samples_y = model_config.num_knots_y * 4;
 
     // y-major storage: knots[y][x]
     auto x_knots = vector_mat<double>(
@@ -238,9 +239,6 @@ py::dict get_matching_spline_distortion_model(
             problem.AddParameterBlock(&y_knots[y][x], 1);
         }
     }
-
-    // Track which cells have in-image distortion residuals
-    std::vector<bool> cell_has_data(map.Nx * map.Ny, false);
 
     for (size_t y_sample_idx = 0; y_sample_idx < num_samples_y;
          ++y_sample_idx) {
@@ -280,23 +278,16 @@ py::dict get_matching_spline_distortion_model(
                 continue;
             }
 
-            cell_has_data[iy * map.Nx + ix] = true;
-
             Vec2<double> normalized_point(x_normalized, y_normalized);
 
-            Vec2<double> opencv_distorted_point;
-            distort_opencv(
-                opencv_distortion_params.data(),
-                normalized_point,
-                opencv_distorted_point
-            );
+            const Vec2<double> distorted_point = distort(normalized_point);
 
             const double u = x_spline - static_cast<double>(ix);
             const double v = y_spline - static_cast<double>(iy);
 
             ceres::CostFunction* cost = DistortionError::Create(
-                opencv_distorted_point.x(),
-                opencv_distorted_point.y(),
+                distorted_point.x(),
+                distorted_point.y(),
                 x_normalized,
                 y_normalized,
                 u,
@@ -338,73 +329,53 @@ py::dict get_matching_spline_distortion_model(
         }
     }
 
-    // Smoothness priors for cells without in-image data
-    const double sqrt_lambda = std::sqrt(model_config.smoothness_lambda);
-    for (int cy = 0; cy < map.Ny; cy++) {
-        for (int cx = 0; cx < map.Nx; cx++) {
-            if (cell_has_data[cy * map.Nx + cx]) {
-                continue;
-            }
-
-            // Horizontal: 4-knot stencil along rows
-            if (cx - 1 >= 0 && cx + 2 < map.Nx) {
-                for (int row = cy; row <= cy + 1 && row < map.Ny; row++) {
-                    auto* cost = new ceres::
-                        AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
-                            new KnotSmoothness{sqrt_lambda}
-                        );
-                    problem.AddResidualBlock(
-                        cost,
-                        nullptr,
-                        &x_knots[row][cx - 1],
-                        &x_knots[row][cx],
-                        &x_knots[row][cx + 1],
-                        &x_knots[row][cx + 2]
-                    );
-                    auto* cost_y = new ceres::
-                        AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
-                            new KnotSmoothness{sqrt_lambda}
-                        );
-                    problem.AddResidualBlock(
-                        cost_y,
-                        nullptr,
-                        &y_knots[row][cx - 1],
-                        &y_knots[row][cx],
-                        &y_knots[row][cx + 1],
-                        &y_knots[row][cx + 2]
-                    );
-                }
-            }
-
-            // Vertical: 4-knot stencil along columns
-            if (cy - 1 >= 0 && cy + 2 < map.Ny) {
-                for (int col = cx; col <= cx + 1 && col < map.Nx; col++) {
-                    auto* cost = new ceres::
-                        AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
-                            new KnotSmoothness{sqrt_lambda}
-                        );
-                    problem.AddResidualBlock(
-                        cost,
-                        nullptr,
-                        &x_knots[cy - 1][col],
-                        &x_knots[cy][col],
-                        &x_knots[cy + 1][col],
-                        &x_knots[cy + 2][col]
-                    );
-                    auto* cost_y = new ceres::
-                        AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
-                            new KnotSmoothness{sqrt_lambda}
-                        );
-                    problem.AddResidualBlock(
-                        cost_y,
-                        nullptr,
-                        &y_knots[cy - 1][col],
-                        &y_knots[cy][col],
-                        &y_knots[cy + 1][col],
-                        &y_knots[cy + 2][col]
-                    );
-                }
-            }
+    const double smoothness_weight = std::sqrt(model_config.smoothness_lambda);
+    for (int y = 0; y < map.Ny; y++) {
+        for (int x = 0; x + 3 < map.Nx; x++) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
+                    new KnotSmoothness{smoothness_weight}
+                ),
+                nullptr,
+                &x_knots[y][x],
+                &x_knots[y][x + 1],
+                &x_knots[y][x + 2],
+                &x_knots[y][x + 3]
+            );
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
+                    new KnotSmoothness{smoothness_weight}
+                ),
+                nullptr,
+                &y_knots[y][x],
+                &y_knots[y][x + 1],
+                &y_knots[y][x + 2],
+                &y_knots[y][x + 3]
+            );
+        }
+    }
+    for (int y = 0; y + 3 < map.Ny; y++) {
+        for (int x = 0; x < map.Nx; x++) {
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
+                    new KnotSmoothness{smoothness_weight}
+                ),
+                nullptr,
+                &x_knots[y][x],
+                &x_knots[y + 1][x],
+                &x_knots[y + 2][x],
+                &x_knots[y + 3][x]
+            );
+            problem.AddResidualBlock(
+                new ceres::AutoDiffCostFunction<KnotSmoothness, 1, 1, 1, 1, 1>(
+                    new KnotSmoothness{smoothness_weight}
+                ),
+                nullptr,
+                &y_knots[y][x],
+                &y_knots[y + 1][x],
+                &y_knots[y + 2][x],
+                &y_knots[y + 3][x]
+            );
         }
     }
 
@@ -451,6 +422,47 @@ py::dict get_matching_spline_distortion_model(
     out["y_range_end"] = map.half_y;
 
     return out;
+}
+
+py::dict get_matching_spline_distortion_model(
+    std::vector<double>& opencv_distortion_params,
+    PinholeSplinedOptimizationConfig& model_config,
+    double image_bound_x,
+    double image_bound_y
+) {
+    auto distort = [&](const Vec2<double>& normalized_point) {
+        Vec2<double> distorted_point;
+        distort_opencv(
+            opencv_distortion_params.data(),
+            normalized_point,
+            distorted_point
+        );
+        return distorted_point;
+    };
+    return fit_matching_spline_distortion_model(
+        model_config,
+        image_bound_x,
+        image_bound_y,
+        distort
+    );
+}
+
+py::dict get_matching_stereographic_spline_distortion_model(
+    PinholeSplinedOptimizationConfig& model_config,
+    double image_bound_x,
+    double image_bound_y
+) {
+    auto distort = [](const Vec2<double>& normalized_point) {
+        const double radius_squared = normalized_point.squaredNorm();
+        const double scale = 2.0 / (std::sqrt(1.0 + radius_squared) + 1.0);
+        return normalized_point * scale;
+    };
+    return fit_matching_spline_distortion_model(
+        model_config,
+        image_bound_x,
+        image_bound_y,
+        distort
+    );
 }
 
 py::dict get_matching_stereographic_opencv_model(
