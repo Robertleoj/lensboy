@@ -10,6 +10,7 @@ from lensboy.calibration import calibrate
 from lensboy.calibration.type_defs import Frame
 from lensboy.camera_models.pinhole_splined import PinholeSplinedConfig
 from lensboy.camera_models.stereographic_opencv import StereographicOpenCV
+from lensboy.camera_models.stereographic_splined import StereographicSplinedConfig
 
 
 def test_automatic_spline_fov_uses_raw_stereographic_fit(
@@ -60,7 +61,7 @@ def test_automatic_spline_fov_uses_raw_stereographic_fit(
     monkeypatch.setattr(
         calibrate,
         "_compute_spline_grid_fov_from_unit_ray_model",
-        lambda model: (123.0, 98.0),
+        lambda model, max_fov_deg: (123.0, 98.0),
     )
 
     fov = calibrate._estimate_spline_fov(
@@ -100,3 +101,64 @@ def test_spline_grid_fov_uses_stereographic_axis_extents() -> None:
     expected_y = np.degrees(4.0 * np.arctan(0.6 / 2.0))
     assert fov_x == pytest.approx(expected_x)
     assert fov_y == pytest.approx(expected_y)
+
+
+def test_automatic_stereographic_spline_fov_uses_raw_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stereographic spline FOV also comes from a distortion-free fit."""
+    frames = [
+        Frame(
+            target_point_indices=np.array([0, 1, 2, 3]),
+            detected_points_in_image=np.zeros((4, 2)),
+        )
+        for _ in range(2)
+    ]
+    target_points = np.zeros((4, 3))
+    config = StereographicSplinedConfig(
+        image_height=480,
+        image_width=640,
+        num_knots_x=10,
+        num_knots_y=8,
+        initial_focal_length=280.0,
+    )
+    fitted_model = StereographicOpenCV(
+        image_height=480,
+        image_width=640,
+        fx=280.0,
+        fy=280.0,
+        cx=320.0,
+        cy=240.0,
+        distortion_coeffs=np.zeros(14),
+    )
+    fit_call: dict[str, Any] = {}
+
+    def fake_calibrate(
+        fit_target_points: np.ndarray,
+        fit_frames: list[Frame],
+        fit_config: object,
+        outlier_threshold_stddevs: float | None,
+        estimate_target_warp: bool,
+    ) -> object:
+        fit_call["config"] = fit_config
+        return SimpleNamespace(camera_model=fitted_model)
+
+    monkeypatch.setattr(calibrate, "_calibrate_stereographic_opencv", fake_calibrate)
+    monkeypatch.setattr(
+        calibrate,
+        "_compute_spline_grid_fov_from_unit_ray_model",
+        lambda model, max_fov_deg: (max_fov_deg, 180.0),
+    )
+
+    fov = calibrate._estimate_spline_fov(
+        frames,
+        [0, 1],
+        target_points,
+        config,
+        max_fov_deg=220.0,
+    )
+
+    fit_config = fit_call["config"]
+    assert fov == (220.0, 180.0)
+    assert fit_config.initial_focal_length == 280.0
+    assert not np.any(fit_config.included_distortion_coefficients)

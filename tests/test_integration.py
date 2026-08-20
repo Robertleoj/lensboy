@@ -552,7 +552,6 @@ def test_stereographic_models_calibrate_beyond_180_degrees() -> None:
             num_knots_x=12,
             num_knots_y=12,
             initial_focal_length=120.0,
-            fov_deg_xy=(225.0, 225.0),
         ),
         estimate_target_warp=False,
     )

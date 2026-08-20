@@ -1534,43 +1534,6 @@ def _select_focal_sweep_frames(
     return [frames[i] for i in sub_indices]
 
 
-def _compute_fov_from_unit_ray_model(
-    model: StereographicOpenCV | StereographicSplined,
-    padding_fraction: float = 0.05,
-    max_fov_deg: float = 220.0,
-) -> tuple[float, float]:
-    """Compute FOV by unprojecting the image border through a unit-ray model.
-
-    Args:
-        model: Fitted stereographic camera model.
-        padding_fraction: Fractional padding to add to each FOV axis.
-        max_fov_deg: Maximum allowed FOV.
-
-    Returns:
-        Padded (fov_deg_x, fov_deg_y), capped at max_fov_deg.
-    """
-    w, h = float(model.image_width), float(model.image_height)
-    n = 80
-    t = np.linspace(0, 1, n)
-    edges = np.concatenate(
-        [
-            np.column_stack([t * w, np.zeros(n)]),
-            np.column_stack([t * w, np.full(n, h)]),
-            np.column_stack([np.zeros(n), t * h]),
-            np.column_stack([np.full(n, w), t * h]),
-        ]
-    )
-    rays = model.normalize_points(edges)
-    angles_x = np.arctan2(rays[:, 0], rays[:, 2])
-    angles_y = np.arctan2(rays[:, 1], rays[:, 2])
-    fov_x = float(np.degrees(np.max(angles_x) - np.min(angles_x)))
-    fov_y = float(np.degrees(np.max(angles_y) - np.min(angles_y)))
-    return (
-        min(fov_x * (1 + padding_fraction), max_fov_deg),
-        min(fov_y * (1 + padding_fraction), max_fov_deg),
-    )
-
-
 def _compute_spline_grid_fov_from_unit_ray_model(
     model: StereographicOpenCV,
     max_fov_deg: float = 175.0,
@@ -1657,65 +1620,12 @@ def _fit_opencv_seed(
     return result, sub_indices
 
 
-def _fit_stereographic_opencv_seed(
-    target_points: np.ndarray,
-    frames: list[Frame],
-    config: StereographicSplinedConfig,
-) -> tuple[CalibrationResult[StereographicOpenCV], list[int]]:
-    """Fit a stereographic OpenCV seed model on coverage-selected frames.
-
-    Args:
-        target_points: 3D target points, shape (N, 3).
-        frames: All calibration frames.
-        config: Stereographic spline config used for image size and focal guess.
-
-    Returns:
-        Tuple of calibration result and selected frame indices.
-    """
-    start_time = default_timer()
-    sub_indices = _select_covering_frames(
-        frames,
-        config.image_width,
-        config.image_height,
-        max_frames=SEED_FIT_MAX_FRAMES,
-    )
-    subsampled_frames = [frames[i] for i in sub_indices]
-
-    seed_config = StereographicOpenCVConfig(
-        image_height=config.image_height,
-        image_width=config.image_width,
-        initial_focal_length=config.initial_focal_length,
-        included_distortion_coefficients=StereographicOpenCVConfig.FULL_14,
-    )
-
-    disable_logs()
-    try:
-        result = _calibrate_stereographic_opencv(
-            target_points,
-            subsampled_frames,
-            seed_config,
-            None,
-            estimate_target_warp=False,
-        )
-    finally:
-        enable_logs()
-
-    fov_x, fov_y = _compute_fov_from_unit_ray_model(
-        result.camera_model,
-        padding_fraction=0.0,
-    )
-    log(
-        f"Fitted stereographic OpenCV seed model: {default_timer() - start_time:.1f}s "
-        f"(FOV: {fov_x:.1f}° x {fov_y:.1f}°)"
-    )
-    return result, sub_indices
-
-
 def _estimate_spline_fov(
     frames: list[Frame],
     sub_indices: list[int],
     target_points: np.ndarray,
-    config: PinholeSplinedConfig,
+    config: PinholeSplinedConfig | StereographicSplinedConfig,
+    max_fov_deg: float = 175.0,
 ) -> tuple[float, float]:
     """Estimate the spline FOV from a raw stereographic fit.
 
@@ -1724,6 +1634,7 @@ def _estimate_spline_fov(
         sub_indices: Indices of subsampled frames used for the seed model.
         target_points: 3D target points, shape (N, 3).
         config: Spline config.
+        max_fov_deg: Maximum spline-grid FOV on either axis.
 
     Returns:
         Estimated (fov_deg_x, fov_deg_y) for the full spline model.
@@ -1751,6 +1662,7 @@ def _estimate_spline_fov(
 
     fov_deg_x, fov_deg_y = _compute_spline_grid_fov_from_unit_ray_model(
         stereographic_result.camera_model,
+        max_fov_deg=max_fov_deg,
     )
     log(
         f"Spline FOV estimate from raw stereographic fit: "
@@ -2031,12 +1943,21 @@ def _calibrate_stereographic_splined(
                 f"{fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
             )
         else:
-            fov_deg_x, fov_deg_y = _compute_fov_from_unit_ray_model(
-                seed_model,
-                padding_fraction=0.05,
+            fov_sub_indices = _select_covering_frames(
+                frames,
+                config.image_width,
+                config.image_height,
+                max_frames=SEED_FIT_MAX_FRAMES,
+            )
+            fov_deg_x, fov_deg_y = _estimate_spline_fov(
+                frames,
+                fov_sub_indices,
+                target_points,
+                config,
+                max_fov_deg=220.0,
             )
             log(
-                f"Stereographic spline FOV estimate: "
+                f"Stereographic spline FOV estimate from raw fit: "
                 f"{fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
             )
         model = _build_initial_stereographic_spline_model(

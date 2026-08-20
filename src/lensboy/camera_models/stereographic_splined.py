@@ -27,7 +27,7 @@ class StereographicSplinedConfig(CameraModelConfig):
         initial_focal_length: Initial focal length guess in pixels, or None to
             estimate automatically from the calibration data.
         fov_deg_xy: Explicit FOV in degrees (x, y) for the spline grid. If None,
-            the FOV is estimated from the seed model.
+            the FOV is estimated from a separate distortion-free stereographic fit.
         smoothness_lambda: Strength of the smoothness prior applied to spline
             knots in regions without calibration data.
     """
