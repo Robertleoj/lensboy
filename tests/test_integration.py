@@ -507,6 +507,62 @@ def test_synthetic_stereographic_splined() -> None:
     _check_frame_projections(result, target_points, frames)
 
 
+def test_stereographic_models_calibrate_beyond_180_degrees() -> None:
+    """Both stereographic models calibrate observations behind the camera plane."""
+    rng = np.random.default_rng(20260820)
+    ground_truth = lb.StereographicOpenCV(
+        image_width=640,
+        image_height=640,
+        fx=112.0,
+        fy=112.0,
+        cx=320.0,
+        cy=320.0,
+        distortion_coeffs=np.zeros(14),
+    )
+    target_points = _make_planar_grid(cols=10, rows=8, spacing=20.0)
+    frames = _generate_stereographic_coverage_frames(
+        rng,
+        ground_truth,
+        target_points,
+        num_frames=100,
+    )
+
+    assert len(frames) >= 80
+    edge_pixels = np.array([[0.0, 320.0], [640.0, 320.0]])
+    ground_truth_rays = ground_truth.normalize_points(edge_pixels)
+    assert _horizontal_ray_span_deg(ground_truth_rays) > 200.0
+
+    opencv_result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=lb.StereographicOpenCVConfig(
+            image_height=640,
+            image_width=640,
+            initial_focal_length=120.0,
+            included_distortion_coefficients=lb.StereographicOpenCVConfig.NONE,
+        ),
+        estimate_target_warp=False,
+    )
+    spline_result = lb.calibrate_camera(
+        target_points,
+        frames,
+        camera_model_config=lb.StereographicSplinedConfig(
+            image_height=640,
+            image_width=640,
+            num_knots_x=12,
+            num_knots_y=12,
+            initial_focal_length=120.0,
+            fov_deg_xy=(225.0, 225.0),
+        ),
+        estimate_target_warp=False,
+    )
+
+    for result in (opencv_result, spline_result):
+        edge_rays = result.camera_model.normalize_points(edge_pixels)
+        assert _horizontal_ray_span_deg(edge_rays) > 200.0
+        assert result.residual_sigma_map() < 0.15
+
+
 def test_wide_angle_spline_models_have_matching_ray_fields() -> None:
     """Stereographic and pinhole splines agree on the supported wide-angle field."""
     from lensboy.analysis.differencing import compute_projection_diff
@@ -757,7 +813,10 @@ def _make_planar_grid(cols: int = 12, rows: int = 9, spacing: float = 30.0) -> n
 
 def _generate_synthetic_frames(
     rng: np.random.Generator,
-    model: lb.OpenCV,
+    model: lb.OpenCV
+    | lb.PinholeSplined
+    | lb.StereographicOpenCV
+    | lb.StereographicSplined,
     target_points: np.ndarray,
     num_frames: int = 40,
     noise_sigma: float = 0.1,
@@ -808,6 +867,93 @@ def _generate_synthetic_frames(
 
         noise = rng.normal(scale=noise_sigma, size=(in_bounds.sum(), 2))
         detected = projected[in_bounds] + noise
+        frames.append(
+            lb.Frame(
+                target_point_indices=all_indices[in_bounds],
+                detected_points_in_image=detected,
+            )
+        )
+
+    return frames
+
+
+def _horizontal_ray_span_deg(rays: np.ndarray) -> float:
+    """Measure horizontal angular span between the first two bearing vectors.
+
+    Args:
+        rays: Camera-frame bearing vectors, shape (2, 3).
+
+    Returns:
+        Angular span in degrees.
+    """
+    unit_rays = rays / np.linalg.norm(rays, axis=1, keepdims=True)
+    dot = float(np.clip(np.dot(unit_rays[0], unit_rays[1]), -1.0, 1.0))
+    shortest_span = float(np.degrees(np.arccos(dot)))
+    if unit_rays[0, 0] < 0.0 and unit_rays[1, 0] > 0.0:
+        return 360.0 - shortest_span
+    return shortest_span
+
+
+def _generate_stereographic_coverage_frames(
+    rng: np.random.Generator,
+    model: lb.StereographicOpenCV,
+    target_points: np.ndarray,
+    num_frames: int,
+) -> list[lb.Frame]:
+    """Generate target views spanning a stereographic image beyond 180 degrees.
+
+    Args:
+        rng: Numpy random generator.
+        model: Ground-truth projection model.
+        target_points: Planar target coordinates, shape (N, 3).
+        num_frames: Number of target views to generate.
+
+    Returns:
+        Synthetic detection frames spanning the image and rear hemisphere.
+    """
+    margin = 140.0
+    center_pixels = rng.uniform(
+        [margin, margin],
+        [model.image_width - margin, model.image_height - margin],
+        size=(num_frames, 2),
+    )
+    center_rays = model.normalize_points(center_pixels)
+    target_radius = float(np.linalg.norm(target_points, axis=1).max())
+    distance = target_radius * 0.7
+    frames: list[lb.Frame] = []
+    all_indices = np.arange(len(target_points))
+
+    for center_ray in center_rays:
+        reference = np.array([0.0, 1.0, 0.0])
+        if abs(float(np.dot(reference, center_ray))) > 0.9:
+            reference = np.array([1.0, 0.0, 0.0])
+        target_x_in_camera = np.cross(reference, center_ray)
+        target_x_in_camera /= np.linalg.norm(target_x_in_camera)
+        target_y_in_camera = np.cross(center_ray, target_x_in_camera)
+
+        roll = rng.uniform(-np.pi, np.pi)
+        cos_roll = np.cos(roll)
+        sin_roll = np.sin(roll)
+        rolled_x = cos_roll * target_x_in_camera + sin_roll * target_y_in_camera
+        rolled_y = -sin_roll * target_x_in_camera + cos_roll * target_y_in_camera
+        camera_from_target = Pose.from_rotmat_trans(
+            rotmat=np.column_stack([rolled_x, rolled_y, center_ray]),
+            trans=center_ray * distance,
+        )
+        points_in_camera = camera_from_target.apply(target_points)
+        projected = model.project_points(points_in_camera)
+        in_bounds = (
+            (projected[:, 0] >= 0.0)
+            & (projected[:, 0] < model.image_width)
+            & (projected[:, 1] >= 0.0)
+            & (projected[:, 1] < model.image_height)
+        )
+        if in_bounds.sum() < 10:
+            continue
+        detected = projected[in_bounds] + rng.normal(
+            scale=0.05,
+            size=(in_bounds.sum(), 2),
+        )
         frames.append(
             lb.Frame(
                 target_point_indices=all_indices[in_bounds],

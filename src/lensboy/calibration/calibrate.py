@@ -492,13 +492,33 @@ def _project_stereographic_points(
     Returns:
         Image coordinates, shape (N, 2).
     """
-    normalized_x = points_in_camera[:, 0] / points_in_camera[:, 2]
-    normalized_y = points_in_camera[:, 1] / points_in_camera[:, 2]
-    r_n_sq = normalized_x * normalized_x + normalized_y * normalized_y
-    scale = 2.0 / (np.sqrt(1.0 + r_n_sq) + 1.0)
-    sx = normalized_x * scale
-    sy = normalized_y * scale
+    ray_norm = np.linalg.norm(points_in_camera, axis=1)
+    denominator = ray_norm + points_in_camera[:, 2]
+    sx = 2.0 * points_in_camera[:, 0] / denominator
+    sy = 2.0 * points_in_camera[:, 1] / denominator
     return np.column_stack([focal_length * sx + cx, focal_length * sy + cy])
+
+
+def _stereographic_front_mask(
+    pixel_coords: np.ndarray,
+    focal_length: float,
+    cx: float,
+    cy: float,
+) -> np.ndarray:
+    """Select well-conditioned front-hemisphere points for pinhole PnP.
+
+    Args:
+        pixel_coords: Image coordinates, shape (N, 2).
+        focal_length: Centered stereographic focal length.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Boolean selection mask, shape (N,).
+    """
+    sx = (pixel_coords[:, 0] - cx) / focal_length
+    sy = (pixel_coords[:, 1] - cy) / focal_length
+    return sx * sx + sy * sy < 3.6
 
 
 def _prepare_pnp_frame_data(
@@ -557,14 +577,19 @@ def _score_stereographic_focal_length(
         if len(obj_pts) < 4:
             continue
 
-        normalized_xy = _stereographic_pixels_to_normalized_xy(
+        pnp_mask = _stereographic_front_mask(
             img_pts,
             focal_length,
             cx,
             cy,
         )
+        if np.count_nonzero(pnp_mask) < 4:
+            continue
+        normalized_xy = _stereographic_pixels_to_normalized_xy(
+            img_pts[pnp_mask], focal_length, cx, cy
+        )
         success, rvec, tvec = cv2.solvePnP(
-            obj_pts,
+            obj_pts[pnp_mask],
             normalized_xy,
             normalized_K,
             zero_distortion,
@@ -624,14 +649,21 @@ def _solve_pnp_all_frames_stereographic(
             solved.append(False)
             continue
 
-        normalized_xy = _stereographic_pixels_to_normalized_xy(
+        pnp_mask = _stereographic_front_mask(
             img_pts,
             focal_length,
             cx,
             cy,
         )
+        if np.count_nonzero(pnp_mask) < 4:
+            poses.append(Pose.identity())
+            solved.append(False)
+            continue
+        normalized_xy = _stereographic_pixels_to_normalized_xy(
+            img_pts[pnp_mask], focal_length, cx, cy
+        )
         success, rvec, tvec = cv2.solvePnP(
-            obj_pts,
+            obj_pts[pnp_mask],
             normalized_xy,
             normalized_K,
             zero_distortion,

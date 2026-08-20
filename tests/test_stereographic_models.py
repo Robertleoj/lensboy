@@ -287,7 +287,7 @@ def test_stereographic_splined_rejects_bad_grid_arrays() -> None:
     ],
 )
 def test_stereographic_models_get_unproject_lut_matches_direct_normalize(
-    model: lb.CameraModel,
+    model: lb.StereographicOpenCV | lb.StereographicSplined,
 ) -> None:
     """LUT generation works for unit-bearing stereographic models."""
     lut = model.get_unproject_lut(grid_size_wh=(17, 13))
@@ -301,3 +301,95 @@ def test_stereographic_models_get_unproject_lut_matches_direct_normalize(
 
     assert np.all(valid)
     np.testing.assert_allclose(actual, expected, atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        lb.StereographicOpenCV(
+            image_width=640,
+            image_height=640,
+            fx=112.0,
+            fy=112.0,
+            cx=320.0,
+            cy=320.0,
+            distortion_coeffs=np.zeros(14),
+        ),
+        lb.StereographicSplined(
+            image_width=640,
+            image_height=640,
+            fx=112.0,
+            fy=112.0,
+            cx=320.0,
+            cy=320.0,
+            dx_grid=np.zeros((12, 12)),
+            dy_grid=np.zeros((12, 12)),
+            num_knots_x=12,
+            num_knots_y=12,
+            fov_deg_x=225.0,
+            fov_deg_y=225.0,
+        ),
+    ],
+)
+def test_distortion_grid_supports_stereographic_fov_beyond_180_degrees(
+    model: lb.StereographicOpenCV | lb.StereographicSplined,
+) -> None:
+    """Distortion grids use a finite stereographic plane beyond 180 degrees."""
+    import matplotlib.pyplot as plt
+
+    from lensboy.analysis.plots import plot_distortion_grid
+
+    figure = plot_distortion_grid(model, grid_cells=12, return_figure=True)
+
+    assert figure is not None
+    assert figure.axes[0].get_title() == "Grid in stereographic space"
+    x_min, x_max = figure.axes[0].get_xlim()
+    assert x_min < -2.0
+    assert x_max > 2.0
+    assert len(figure.axes[1].collections) > 0
+    plt.close(figure)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        lb.OpenCV(
+            image_width=640,
+            image_height=480,
+            fx=400.0,
+            fy=400.0,
+            cx=320.0,
+            cy=240.0,
+            distortion_coeffs=np.zeros(14),
+        ),
+        lb.PinholeSplined(
+            image_width=640,
+            image_height=480,
+            fx=400.0,
+            fy=400.0,
+            cx=320.0,
+            cy=240.0,
+            dx_grid=np.zeros((8, 12)),
+            dy_grid=np.zeros((8, 12)),
+            num_knots_x=12,
+            num_knots_y=8,
+            fov_deg_x=100.0,
+            fov_deg_y=80.0,
+        ),
+    ],
+)
+def test_pinhole_model_distortion_grids_also_use_stereographic_space(
+    model: lb.OpenCV | lb.PinholeSplined,
+) -> None:
+    """Pinhole-model distortion grids use the shared stereographic plane."""
+    import matplotlib.pyplot as plt
+
+    from lensboy.analysis.plots import plot_distortion_grid
+
+    figure = plot_distortion_grid(model, grid_cells=12, return_figure=True)
+
+    assert figure is not None
+    assert figure.axes[0].get_title() == "Grid in stereographic space"
+    assert figure.axes[0].get_xlabel() == "x_s"
+    assert figure.axes[0].get_ylabel() == "y_s"
+    plt.close(figure)

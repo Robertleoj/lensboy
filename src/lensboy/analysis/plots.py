@@ -360,7 +360,10 @@ def _plot_outliers(
 
 
 def plot_distortion_grid(
-    model: lb.OpenCV | lb.PinholeSplined,
+    model: lb.OpenCV
+    | lb.PinholeSplined
+    | lb.StereographicOpenCV
+    | lb.StereographicSplined,
     *,
     grid_cells: int = 50,
     fov_fraction: float | None = None,
@@ -372,15 +375,16 @@ def plot_distortion_grid(
 ) -> Figure | None:
     """Project a regular grid through a camera model to visualize distortion.
 
-    Builds a grid in normalized (tan-angle) space from the model's FOV, projects
-    it, and clips to the image bounds.
+    Builds a grid in stereographic space, converts it to unit rays, projects it,
+    and clips to the image bounds. Stereographic coordinates remain finite
+    across 180 degrees and provide one plotting domain for all camera models.
 
     Args:
         model: Camera model instance.
         grid_cells: Number of grid cells along the longer axis.
         fov_fraction: Fraction of the full FOV to sample (0, 1].
-        ux_max: Upper bound in normalized x, mirrored to negative.
-        uy_max: Upper bound in normalized y, mirrored to negative.
+        ux_max: Upper bound in stereographic x, mirrored to negative.
+        uy_max: Upper bound in stereographic y, mirrored to negative.
         cmap_name: Matplotlib colormap name.
         show_spline_knots: When True and the model is a PinholeSplined,
             overlay the spline control points on both panels.
@@ -396,8 +400,25 @@ def plot_distortion_grid(
     cx = model.cx
     cy = model.cy
 
-    fov_x_half = np.tan(np.deg2rad(model.fov_deg_x) / 2.0)
-    fov_y_half = np.tan(np.deg2rad(model.fov_deg_y) / 2.0)
+    border = np.array(
+        [
+            [0.0, 0.0],
+            [W, 0.0],
+            [0.0, H],
+            [W, H],
+            [0.0, cy],
+            [W, cy],
+            [cx, 0.0],
+            [cx, H],
+        ]
+    )
+    border_rays = model.normalize_points(border)
+    ray_norms = np.linalg.norm(border_rays, axis=1)
+    denominator = ray_norms + border_rays[:, 2]
+    border_x = 2.0 * border_rays[:, 0] / denominator
+    border_y = 2.0 * border_rays[:, 1] / denominator
+    fov_x_half = float(np.max(np.abs(border_x)))
+    fov_y_half = float(np.max(np.abs(border_y)))
 
     if fov_fraction is not None:
         x_half = fov_x_half * fov_fraction
@@ -434,7 +455,15 @@ def plot_distortion_grid(
     y_lines = nice_ticks(y_min, y_max, grid_step_norm)
 
     def project_polyline(xn: np.ndarray, yn: np.ndarray) -> np.ndarray:
-        pts = np.stack([xn, yn, np.ones_like(xn)], axis=1)  # (N,3)
+        radius_squared = xn * xn + yn * yn
+        denominator = 4.0 + radius_squared
+        pts = np.column_stack(
+            [
+                4.0 * xn / denominator,
+                4.0 * yn / denominator,
+                (4.0 - radius_squared) / denominator,
+            ]
+        )
         uv = model.project_points(pts)
         return np.asarray(uv, dtype=float)
 
@@ -483,7 +512,7 @@ def plot_distortion_grid(
         for spine in ax.spines.values():
             spine.set_color("white")
 
-    # --- Left panel: grid in normalized space ---
+    # --- Left panel: grid in stereographic space ---
     lw = 1.0
     n_subdivide = 64
     for x0 in x_lines:
@@ -497,7 +526,7 @@ def plot_distortion_grid(
         segs, colors = make_segments(xs, ys, xs, ys)
         ax0.add_collection(LineCollection(segs, colors=colors, linewidths=lw))  # type: ignore[reportArgumentType]
 
-    # Rectangle corner markers in normalized space
+    # Rectangle corner markers in stereographic space
     rect_step = grid_step_norm * 4
     corner_len = grid_step_norm * 2
     norm_aspect = x_half / y_half
@@ -536,9 +565,9 @@ def plot_distortion_grid(
     ax0.scatter(
         0.0, 0.0, s=80, color="white", edgecolor="black", linewidth=1.5, zorder=11
     )
-    ax0.set_title("Grid in normalized space")
-    ax0.set_xlabel("x_n")
-    ax0.set_ylabel("y_n")
+    ax0.set_title("Grid in stereographic space")
+    ax0.set_xlabel("x_s")
+    ax0.set_ylabel("y_s")
     ax0.set_aspect("equal")
     ax0.set_xlim(x_min, x_max)
     ax0.set_ylim(y_max, y_min)
@@ -612,12 +641,14 @@ def plot_distortion_grid(
                     zorder=10,
                 )
 
-    if show_spline_knots and isinstance(model, lb.PinholeSplined | lb.StereographicSplined):
+    if show_spline_knots and isinstance(
+        model,
+        (lb.PinholeSplined, lb.StereographicSplined),
+    ):
         Nx = model.num_knots_x
         Ny = model.num_knots_y
         kx_indices = np.arange(Nx)
         ky_indices = np.arange(Ny)
-        # Knots are evenly spaced in stereographic space; convert to normalized
         fov_x_rad = np.deg2rad(model.fov_deg_x)
         fov_y_rad = np.deg2rad(model.fov_deg_y)
         stereo_x_half = 2 * np.tan(fov_x_rad / 4)
@@ -627,12 +658,8 @@ def plot_distortion_grid(
         knot_xs_grid, knot_ys_grid = np.meshgrid(knot_xs, knot_ys)
         knot_xs_flat = knot_xs_grid.ravel()
         knot_ys_flat = knot_ys_grid.ravel()
-        # Stereographic to normalized: r_s -> theta = 2*arctan(r_s/2), r_n = tan(theta)
-        r_s = np.sqrt(knot_xs_flat**2 + knot_ys_flat**2 + 1e-30)
-        theta = 2 * np.arctan(r_s / 2)
-        scale = np.tan(theta) / r_s
-        knot_xn_flat = knot_xs_flat * scale
-        knot_yn_flat = knot_ys_flat * scale
+        knot_xn_flat = knot_xs_flat
+        knot_yn_flat = knot_ys_flat
 
         ax0.scatter(
             knot_xn_flat,
@@ -644,10 +671,7 @@ def plot_distortion_grid(
             zorder=9,
         )
 
-        knot_pts_3d = np.stack(
-            [knot_xn_flat, knot_yn_flat, np.ones_like(knot_xn_flat)], axis=1
-        )
-        knot_uv = model.project_points(knot_pts_3d)
+        knot_uv = project_polyline(knot_xn_flat, knot_yn_flat)
         ax1.scatter(
             knot_uv[:, 0],
             knot_uv[:, 1],
