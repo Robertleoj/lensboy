@@ -1,5 +1,6 @@
 #include <ceres/jet.h>
 #include <spdlog/spdlog.h>
+#include <unsupported/Eigen/AutoDiff>
 #include "./pybind_utils.hpp"
 #include "cameramodels.hpp"
 #include "ceres_geometry.hpp"
@@ -140,42 +141,26 @@ static py::array_t<double> normalize_stereographic_opencv_points(
         double sy = target_y;
 
         for (int iter = 0; iter < max_newton; iter++) {
-            Vec2<double> distorted;
-            distort_opencv(params + 4, Vec2<double>(sx, sy), distorted);
+            using Dual = Eigen::AutoDiffScalar<Eigen::Vector2d>;
+            Dual dual_sx(sx, 2, 0);
+            Dual dual_sy(sy, 2, 1);
+            Dual coeffs[14];
+            for (int coeff_idx = 0; coeff_idx < 14; coeff_idx++) {
+                coeffs[coeff_idx] = Dual(params[4 + coeff_idx]);
+            }
+            Vec2<Dual> distorted;
+            distort_opencv(coeffs, Vec2<Dual>(dual_sx, dual_sy), distorted);
 
-            const double res0 = distorted[0] - target_x;
-            const double res1 = distorted[1] - target_y;
+            const double res0 = distorted[0].value() - target_x;
+            const double res1 = distorted[1].value() - target_y;
             if (res0 * res0 + res1 * res1 < tol * tol) {
                 break;
             }
 
-            const double step_x = 1e-6 * std::max(1.0, std::abs(sx));
-            const double step_y = 1e-6 * std::max(1.0, std::abs(sy));
-            Vec2<double> plus_x, minus_x, plus_y, minus_y;
-            distort_opencv(
-                params + 4,
-                Vec2<double>(sx + step_x, sy),
-                plus_x
-            );
-            distort_opencv(
-                params + 4,
-                Vec2<double>(sx - step_x, sy),
-                minus_x
-            );
-            distort_opencv(
-                params + 4,
-                Vec2<double>(sx, sy + step_y),
-                plus_y
-            );
-            distort_opencv(
-                params + 4,
-                Vec2<double>(sx, sy - step_y),
-                minus_y
-            );
-            const double J00 = (plus_x[0] - minus_x[0]) / (2.0 * step_x);
-            const double J10 = (plus_x[1] - minus_x[1]) / (2.0 * step_x);
-            const double J01 = (plus_y[0] - minus_y[0]) / (2.0 * step_y);
-            const double J11 = (plus_y[1] - minus_y[1]) / (2.0 * step_y);
+            const double J00 = distorted[0].derivatives()[0];
+            const double J01 = distorted[0].derivatives()[1];
+            const double J10 = distorted[1].derivatives()[0];
+            const double J11 = distorted[1].derivatives()[1];
             const double det = J00 * J11 - J01 * J10;
             if (std::abs(det) < 1e-30) {
                 break;

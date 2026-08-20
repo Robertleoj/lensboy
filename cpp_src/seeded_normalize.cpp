@@ -1,6 +1,7 @@
 #include <ceres/jet.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <unsupported/Eigen/AutoDiff>
 
 #include <algorithm>
 #include <array>
@@ -360,62 +361,38 @@ static void refine_opencv(
     double& normalized_y,
     const double* intrinsics  // fx, fy, cx, cy, dist[14]
 ) {
+    using Dual = Eigen::AutoDiffScalar<Eigen::Vector2d>;
     constexpr int max_iterations = 20;
     constexpr double tolerance_squared = 1e-14;
 
+    std::array<Dual, 18> dual_intrinsics;
+    for (int i = 0; i < 18; i++) {
+        dual_intrinsics[i] = Dual(intrinsics[i]);
+    }
+
     for (int iteration = 0; iteration < max_iterations; iteration++) {
-        double pixel_x, pixel_y;
+        Dual dual_normalized_x(normalized_x, 2, 0);
+        Dual dual_normalized_y(normalized_y, 2, 1);
+        Dual pixel_x, pixel_y;
         forward_opencv(
-            normalized_x,
-            normalized_y,
-            intrinsics,
+            dual_normalized_x,
+            dual_normalized_y,
+            dual_intrinsics.data(),
             pixel_x,
             pixel_y
         );
 
-        double residual_x = pixel_x - target_pixel_x;
-        double residual_y = pixel_y - target_pixel_y;
+        double residual_x = pixel_x.value() - target_pixel_x;
+        double residual_y = pixel_y.value() - target_pixel_y;
         if (residual_x * residual_x + residual_y * residual_y <
             tolerance_squared) {
             break;
         }
 
-        const double step_x = 1e-6 * std::max(1.0, std::abs(normalized_x));
-        const double step_y = 1e-6 * std::max(1.0, std::abs(normalized_y));
-        double plus_x_x, plus_x_y, minus_x_x, minus_x_y;
-        double plus_y_x, plus_y_y, minus_y_x, minus_y_y;
-        forward_opencv(
-            normalized_x + step_x,
-            normalized_y,
-            intrinsics,
-            plus_x_x,
-            plus_x_y
-        );
-        forward_opencv(
-            normalized_x - step_x,
-            normalized_y,
-            intrinsics,
-            minus_x_x,
-            minus_x_y
-        );
-        forward_opencv(
-            normalized_x,
-            normalized_y + step_y,
-            intrinsics,
-            plus_y_x,
-            plus_y_y
-        );
-        forward_opencv(
-            normalized_x,
-            normalized_y - step_y,
-            intrinsics,
-            minus_y_x,
-            minus_y_y
-        );
-        double jacobian_x_x = (plus_x_x - minus_x_x) / (2.0 * step_x);
-        double jacobian_y_x = (plus_x_y - minus_x_y) / (2.0 * step_x);
-        double jacobian_x_y = (plus_y_x - minus_y_x) / (2.0 * step_y);
-        double jacobian_y_y = (plus_y_y - minus_y_y) / (2.0 * step_y);
+        double jacobian_x_x = pixel_x.derivatives()[0];
+        double jacobian_x_y = pixel_x.derivatives()[1];
+        double jacobian_y_x = pixel_y.derivatives()[0];
+        double jacobian_y_y = pixel_y.derivatives()[1];
         double determinant =
             jacobian_x_x * jacobian_y_y - jacobian_x_y * jacobian_y_x;
         if (std::abs(determinant) < 1e-30) {

@@ -43,7 +43,7 @@ static bool configure_sparse_schur_if_available(
     return false;
 }
 
-struct TargetWarpBasis {
+struct StereographicTargetWarpBasis {
     Vec3<double> center;
     Vec3<double> x_hat;
     Vec3<double> y_hat;
@@ -52,7 +52,7 @@ struct TargetWarpBasis {
     double inv_y_scale;
 };
 
-static TargetWarpBasis make_target_warp_basis(
+static StereographicTargetWarpBasis make_target_warp_basis(
     const WarpCoordinates& warp
 ) {
     const Vec3<double> rv = warp.target_from_warp_frame.head<3>();
@@ -64,7 +64,7 @@ static TargetWarpBasis make_target_warp_basis(
         R = Eigen::AngleAxisd(angle, rv / angle).toRotationMatrix();
     }
 
-    return TargetWarpBasis{
+    return StereographicTargetWarpBasis{
         warp.target_from_warp_frame.tail<3>(),
         R.col(0),
         R.col(1),
@@ -77,7 +77,7 @@ static TargetWarpBasis make_target_warp_basis(
 template <typename T>
 Vec3<T> apply_target_warp_with_basis(
     const Vec3<T>& p_target,
-    const TargetWarpBasis& warp,
+    const StereographicTargetWarpBasis& warp,
     const T* const coeffs
 ) {
     const Vec3<T> d = p_target - warp.center.cast<T>();
@@ -118,7 +118,7 @@ struct ReprojectionErrorStereographicSplinedWarp {
     Vec3<double> pw;
     int ix0, iy0;
     double obs_x, obs_y;
-    TargetWarpBasis warp_basis;
+    StereographicTargetWarpBasis warp_basis;
 
     // clang-format off
     template <typename T>
@@ -235,7 +235,7 @@ struct ReprojectionErrorStereographicSplinedNoWarp {
     }
 };
 
-struct KnotSmoothness2D {
+struct StereographicKnotSmoothness2D {
     double weight;
 
     template <typename T>
@@ -254,7 +254,7 @@ struct KnotSmoothness2D {
     }
 };
 
-struct ObservationRecord {
+struct StereographicObservationRecord {
     size_t cam_idx;
     int pt_idx;
     int ix;
@@ -265,7 +265,7 @@ static bool any_cell_changed(
     const StereographicSplineMap& map,
     const std::vector<Vec6<double>>& cams,
     const std::vector<Vec3<double>>& pts,
-    const std::vector<ObservationRecord>& obs
+    const std::vector<StereographicObservationRecord>& obs
 ) {
     for (auto& r : obs) {
         int ix, iy;
@@ -291,9 +291,13 @@ static void add_grid_smoothness(
             const int k2 = y * nx + x + 2;
             const int k3 = y * nx + x + 3;
             problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<KnotSmoothness2D, 2, 2, 2, 2, 2>(
-                    new KnotSmoothness2D{weight}
-                ),
+                new ceres::AutoDiffCostFunction<
+                    StereographicKnotSmoothness2D,
+                    2,
+                    2,
+                    2,
+                    2,
+                    2>(new StereographicKnotSmoothness2D{weight}),
                 nullptr,
                 knot_blocks[k0],
                 knot_blocks[k1],
@@ -310,9 +314,13 @@ static void add_grid_smoothness(
             const int k2 = (y + 2) * nx + x;
             const int k3 = (y + 3) * nx + x;
             problem.AddResidualBlock(
-                new ceres::AutoDiffCostFunction<KnotSmoothness2D, 2, 2, 2, 2, 2>(
-                    new KnotSmoothness2D{weight}
-                ),
+                new ceres::AutoDiffCostFunction<
+                    StereographicKnotSmoothness2D,
+                    2,
+                    2,
+                    2,
+                    2,
+                    2>(new StereographicKnotSmoothness2D{weight}),
                 nullptr,
                 knot_blocks[k0],
                 knot_blocks[k1],
@@ -336,14 +344,14 @@ static void build_problem(
     const std::vector<
         std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>& frames,
     std::vector<double*>& knot_blocks,
-    std::vector<ObservationRecord>& obs_records,
+    std::vector<StereographicObservationRecord>& obs_records,
     double smoothness_weight
 ) {
     const int nx = static_cast<int>(cfg.num_knots_x);
     const int ny = static_cast<int>(cfg.num_knots_y);
     const int n_knots = nx * ny;
     const bool has_warp = warp_coordinates.has_value();
-    TargetWarpBasis warp_basis{};
+    StereographicTargetWarpBasis warp_basis{};
     if (has_warp) {
         warp_basis = make_target_warp_basis(*warp_coordinates);
         problem.AddParameterBlock(warp_coeffs, 5);
@@ -416,7 +424,9 @@ static void build_problem(
             }
             // clang-format on
 
-            obs_records.push_back(ObservationRecord{cam_idx, pt_idx, ix, iy});
+            obs_records.push_back(
+                StereographicObservationRecord{cam_idx, pt_idx, ix, iy}
+            );
         }
     }
 
@@ -485,9 +495,9 @@ py::dict fine_tune_stereographic_splined(
     }
     options.minimizer_progress_to_stdout = false;
 
-    constexpr int max_rebuilds = 20;
+    constexpr int max_rebuilds = 1000;
     std::vector<double*> knot_blocks;
-    std::vector<ObservationRecord> obs_records;
+    std::vector<StereographicObservationRecord> obs_records;
     ceres::Solver::Summary last_summary;
 
     double prev_cost = std::numeric_limits<double>::max();
