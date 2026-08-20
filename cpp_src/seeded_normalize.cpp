@@ -360,42 +360,62 @@ static void refine_opencv(
     double& normalized_y,
     const double* intrinsics  // fx, fy, cx, cy, dist[14]
 ) {
-    using Jet = ceres::Jet<double, 2>;
     constexpr int max_iterations = 20;
     constexpr double tolerance_squared = 1e-14;
 
-    // Convert intrinsics to Jet constants (only normalized_x, normalized_y are
-    // variables)
-    std::array<Jet, 18> jet_intrinsics;
-    for (int i = 0; i < 18; i++) {
-        jet_intrinsics[i] = Jet(intrinsics[i]);
-    }
-
     for (int iteration = 0; iteration < max_iterations; iteration++) {
-        Jet jet_normalized_x(normalized_x);
-        Jet jet_normalized_y(normalized_y);
-        jet_normalized_x.v[0] = 1.0;
-        jet_normalized_y.v[1] = 1.0;
-        Jet jet_pixel_x, jet_pixel_y;
+        double pixel_x, pixel_y;
         forward_opencv(
-            jet_normalized_x,
-            jet_normalized_y,
-            jet_intrinsics.data(),
-            jet_pixel_x,
-            jet_pixel_y
+            normalized_x,
+            normalized_y,
+            intrinsics,
+            pixel_x,
+            pixel_y
         );
 
-        double residual_x = jet_pixel_x.a - target_pixel_x;
-        double residual_y = jet_pixel_y.a - target_pixel_y;
+        double residual_x = pixel_x - target_pixel_x;
+        double residual_y = pixel_y - target_pixel_y;
         if (residual_x * residual_x + residual_y * residual_y <
             tolerance_squared) {
             break;
         }
 
-        double jacobian_x_x = jet_pixel_x.v[0];
-        double jacobian_x_y = jet_pixel_x.v[1];
-        double jacobian_y_x = jet_pixel_y.v[0];
-        double jacobian_y_y = jet_pixel_y.v[1];
+        const double step_x = 1e-6 * std::max(1.0, std::abs(normalized_x));
+        const double step_y = 1e-6 * std::max(1.0, std::abs(normalized_y));
+        double plus_x_x, plus_x_y, minus_x_x, minus_x_y;
+        double plus_y_x, plus_y_y, minus_y_x, minus_y_y;
+        forward_opencv(
+            normalized_x + step_x,
+            normalized_y,
+            intrinsics,
+            plus_x_x,
+            plus_x_y
+        );
+        forward_opencv(
+            normalized_x - step_x,
+            normalized_y,
+            intrinsics,
+            minus_x_x,
+            minus_x_y
+        );
+        forward_opencv(
+            normalized_x,
+            normalized_y + step_y,
+            intrinsics,
+            plus_y_x,
+            plus_y_y
+        );
+        forward_opencv(
+            normalized_x,
+            normalized_y - step_y,
+            intrinsics,
+            minus_y_x,
+            minus_y_y
+        );
+        double jacobian_x_x = (plus_x_x - minus_x_x) / (2.0 * step_x);
+        double jacobian_y_x = (plus_x_y - minus_x_y) / (2.0 * step_x);
+        double jacobian_x_y = (plus_y_x - minus_y_x) / (2.0 * step_y);
+        double jacobian_y_y = (plus_y_y - minus_y_y) / (2.0 * step_y);
         double determinant =
             jacobian_x_x * jacobian_y_y - jacobian_x_y * jacobian_y_x;
         if (std::abs(determinant) < 1e-30) {
@@ -511,10 +531,8 @@ static void refine_splined(
         for (int iteration = 0; iteration < max_newton_iterations;
              iteration++) {
             num_iterations++;
-            Jet jet_normalized_x(normalized_x);
-            Jet jet_normalized_y(normalized_y);
-            jet_normalized_x.v[0] = 1.0;
-            jet_normalized_y.v[1] = 1.0;
+            Jet jet_normalized_x(normalized_x, 0);
+            Jet jet_normalized_y(normalized_y, 1);
             Jet jet_stereographic_x, jet_stereographic_y;
             normalized_to_stereographic(
                 jet_normalized_x,

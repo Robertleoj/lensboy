@@ -140,26 +140,42 @@ static py::array_t<double> normalize_stereographic_opencv_points(
         double sy = target_y;
 
         for (int iter = 0; iter < max_newton; iter++) {
-            using Jet = ceres::Jet<double, 2>;
-            Jet jsx(sx);
-            Jet jsy(sy);
-            jsx.v[0] = 1.0;
-            jsy.v[1] = 1.0;
-            Jet coeffs[14];
-            for (int coeff_idx = 0; coeff_idx < 14; coeff_idx++) {
-                coeffs[coeff_idx] = Jet(params[4 + coeff_idx]);
-            }
-            Vec2<Jet> distorted;
-            distort_opencv(coeffs, Vec2<Jet>(jsx, jsy), distorted);
+            Vec2<double> distorted;
+            distort_opencv(params + 4, Vec2<double>(sx, sy), distorted);
 
-            const double res0 = distorted[0].a - target_x;
-            const double res1 = distorted[1].a - target_y;
+            const double res0 = distorted[0] - target_x;
+            const double res1 = distorted[1] - target_y;
             if (res0 * res0 + res1 * res1 < tol * tol) {
                 break;
             }
 
-            const double J00 = distorted[0].v[0], J01 = distorted[0].v[1];
-            const double J10 = distorted[1].v[0], J11 = distorted[1].v[1];
+            const double step_x = 1e-6 * std::max(1.0, std::abs(sx));
+            const double step_y = 1e-6 * std::max(1.0, std::abs(sy));
+            Vec2<double> plus_x, minus_x, plus_y, minus_y;
+            distort_opencv(
+                params + 4,
+                Vec2<double>(sx + step_x, sy),
+                plus_x
+            );
+            distort_opencv(
+                params + 4,
+                Vec2<double>(sx - step_x, sy),
+                minus_x
+            );
+            distort_opencv(
+                params + 4,
+                Vec2<double>(sx, sy + step_y),
+                plus_y
+            );
+            distort_opencv(
+                params + 4,
+                Vec2<double>(sx, sy - step_y),
+                minus_y
+            );
+            const double J00 = (plus_x[0] - minus_x[0]) / (2.0 * step_x);
+            const double J10 = (plus_x[1] - minus_x[1]) / (2.0 * step_x);
+            const double J01 = (plus_y[0] - minus_y[0]) / (2.0 * step_y);
+            const double J11 = (plus_y[1] - minus_y[1]) / (2.0 * step_y);
             const double det = J00 * J11 - J01 * J10;
             if (std::abs(det) < 1e-30) {
                 break;
@@ -304,10 +320,8 @@ static py::array_t<double> normalize_stereographic_splined_points(
             }
 
             for (int iter = 0; iter < max_newton; iter++) {
-                Jet jsx(sx);
-                Jet jsy(sy);
-                jsx.v[0] = 1.0;
-                jsy.v[1] = 1.0;
+                Jet jsx(sx, 0);
+                Jet jsy(sy, 1);
                 Jet jgx, jgy;
                 map.stereo_to_grid_coords(jsx, jsy, jgx, jgy);
                 Jet ju = jgx - Jet(static_cast<double>(ix0));
