@@ -141,8 +141,10 @@ static py::array_t<double> normalize_stereographic_opencv_points(
 
         for (int iter = 0; iter < max_newton; iter++) {
             using Jet = ceres::Jet<double, 2>;
-            Jet jsx(sx, 0);
-            Jet jsy(sy, 1);
+            Jet jsx(sx);
+            Jet jsy(sy);
+            jsx.v[0] = 1.0;
+            jsy.v[1] = 1.0;
             Jet coeffs[14];
             for (int coeff_idx = 0; coeff_idx < 14; coeff_idx++) {
                 coeffs[coeff_idx] = Jet(params[4 + coeff_idx]);
@@ -302,8 +304,10 @@ static py::array_t<double> normalize_stereographic_splined_points(
             }
 
             for (int iter = 0; iter < max_newton; iter++) {
-                Jet jsx(sx, 0);
-                Jet jsy(sy, 1);
+                Jet jsx(sx);
+                Jet jsy(sy);
+                jsx.v[0] = 1.0;
+                jsy.v[1] = 1.0;
                 Jet jgx, jgy;
                 map.stereo_to_grid_coords(jsx, jsy, jgx, jgy);
                 Jet ju = jgx - Jet(static_cast<double>(ix0));

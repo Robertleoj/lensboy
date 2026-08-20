@@ -372,8 +372,10 @@ static void refine_opencv(
     }
 
     for (int iteration = 0; iteration < max_iterations; iteration++) {
-        Jet jet_normalized_x(normalized_x, 0);
-        Jet jet_normalized_y(normalized_y, 1);
+        Jet jet_normalized_x(normalized_x);
+        Jet jet_normalized_y(normalized_y);
+        jet_normalized_x.v[0] = 1.0;
+        jet_normalized_y.v[1] = 1.0;
         Jet jet_pixel_x, jet_pixel_y;
         forward_opencv(
             jet_normalized_x,
@@ -509,8 +511,10 @@ static void refine_splined(
         for (int iteration = 0; iteration < max_newton_iterations;
              iteration++) {
             num_iterations++;
-            Jet jet_normalized_x(normalized_x, 0);
-            Jet jet_normalized_y(normalized_y, 1);
+            Jet jet_normalized_x(normalized_x);
+            Jet jet_normalized_y(normalized_y);
+            jet_normalized_x.v[0] = 1.0;
+            jet_normalized_y.v[1] = 1.0;
             Jet jet_stereographic_x, jet_stereographic_y;
             normalized_to_stereographic(
                 jet_normalized_x,

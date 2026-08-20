@@ -69,8 +69,10 @@ static Vec2<double> normalize_single_point(
 
         // Newton iterations with autodiff via Ceres Jets
         for (int iter = 0; iter < max_newton; iter++) {
-            Jet jet_normalized_x(normalized_x, 0);
-            Jet jet_normalized_y(normalized_y, 1);
+            Jet jet_normalized_x(normalized_x);
+            Jet jet_normalized_y(normalized_y);
+            jet_normalized_x.v[0] = 1.0;
+            jet_normalized_y.v[1] = 1.0;
 
             // Normalized coords -> stereographic -> spline coords
             Jet jsx, jsy;

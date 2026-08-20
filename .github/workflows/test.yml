@@ -33,11 +33,4 @@ jobs:
         run: uv run pyright
 
       - name: Run tests
-        run: |
-          status=0
-          for test_file in tests/test_*.py; do
-            if ! uv run pytest "$test_file"; then
-              status=1
-            fi
-          done
-          exit "$status"
+        run: uv run pytest tests/
