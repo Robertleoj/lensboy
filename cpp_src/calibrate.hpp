@@ -23,6 +23,15 @@ py::dict calibrate_opencv(
     std::array<double, 5> warp_coeffs_initial = {0.0, 0.0, 0.0, 0.0, 0.0}
 );
 
+py::dict calibrate_raw_stereographic(
+    std::vector<double>& intrinsics_initial_value,
+    std::vector<bool>& intrinsics_param_optimize_mask,
+    std::vector<Vec6<double>>& cameras_from_target,
+    std::vector<Vec3<double>>& target_points,
+    std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>&
+        frames
+);
+
 py::dict get_matching_spline_distortion_model(
     std::vector<double>& opencv_distortion_params,
     PinholeSplinedOptimizationConfig& model_config,
@@ -52,6 +61,33 @@ py::dict fine_tune_pinhole_splined(
         frames,
     std::optional<WarpCoordinates> warp_coordinates = std::nullopt,
     std::array<double, 5> warp_coeffs_initial = {0.0, 0.0, 0.0, 0.0, 0.0}
+);
+
+py::dict projection_uncertainty_opencv(
+    std::vector<double>& intrinsics,
+    std::vector<Vec6<double>>& cameras_from_target,
+    std::vector<Vec3<double>>& target_points,
+    std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>&
+        frames,
+    py::array_t<double, py::array::c_style | py::array::forcecast> query_rays,
+    std::optional<WarpCoordinates> warp_coordinates,
+    std::array<double, 5> warp_coeffs_initial,
+    double damping,
+    double relative_eigen_floor
+);
+
+py::dict projection_uncertainty_pinhole_splined(
+    PinholeSplinedOptimizationConfig& model_config,
+    PinholeSplinedIntrinsicsParameters& intrinsics_parameters,
+    std::vector<Vec6<double>>& cameras_from_target,
+    std::vector<Vec3<double>>& target_points,
+    std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>&
+        frames,
+    py::array_t<double, py::array::c_style | py::array::forcecast> query_rays,
+    std::optional<WarpCoordinates> warp_coordinates,
+    std::array<double, 5> warp_coeffs_initial,
+    double damping,
+    double relative_eigen_floor
 );
 
 py::array_t<double> normalize_pinhole_splined_points(

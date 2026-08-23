@@ -238,6 +238,16 @@ PYBIND11_MODULE(
     );
 
     m.def(
+        "calibrate_raw_stereographic",
+        &lensboy::calibrate_raw_stereographic,
+        py::arg("intrinsics_initial_value"),
+        py::arg("intrinsics_param_optimize_mask"),
+        py::arg("cameras_from_target"),
+        py::arg("target_points"),
+        py::arg("frames")
+    );
+
+    m.def(
         "get_matching_spline_distortion_model",
         &lensboy::get_matching_spline_distortion_model,
         py::arg("opencv_distortion_params"),
@@ -274,6 +284,37 @@ PYBIND11_MODULE(
         py::arg("warp_coordinates") = py::none(),
         py::arg("warp_coeffs_initial") =
             std::array<double, 5>{0.0, 0.0, 0.0, 0.0, 0.0}
+    );
+
+    m.def(
+        "projection_uncertainty_opencv",
+        &lensboy::projection_uncertainty_opencv,
+        py::arg("intrinsics"),
+        py::arg("cameras_from_target"),
+        py::arg("target_points"),
+        py::arg("frames"),
+        py::arg("query_rays"),
+        py::arg("warp_coordinates") = py::none(),
+        py::arg("warp_coeffs_initial") =
+            std::array<double, 5>{0.0, 0.0, 0.0, 0.0, 0.0},
+        py::arg("damping") = 1e-9,
+        py::arg("relative_eigen_floor") = 1e-12
+    );
+
+    m.def(
+        "projection_uncertainty_pinhole_splined",
+        &lensboy::projection_uncertainty_pinhole_splined,
+        py::arg("model_config"),
+        py::arg("intrinsics_parameters"),
+        py::arg("cameras_from_target"),
+        py::arg("target_points"),
+        py::arg("frames"),
+        py::arg("query_rays"),
+        py::arg("warp_coordinates") = py::none(),
+        py::arg("warp_coeffs_initial") =
+            std::array<double, 5>{0.0, 0.0, 0.0, 0.0, 0.0},
+        py::arg("damping") = 1e-9,
+        py::arg("relative_eigen_floor") = 1e-12
     );
 
     m.def(

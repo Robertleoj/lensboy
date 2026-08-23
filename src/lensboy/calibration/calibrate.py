@@ -75,7 +75,13 @@ class _RawStereographicSeed:
         Returns:
             Image coordinates, shape (N, 2).
         """
-        return _project_stereographic_points(points_in_camera, self.fx, self.cx, self.cy)
+        return _project_raw_stereographic_points(
+            points_in_camera,
+            self.fx,
+            self.fy,
+            self.cx,
+            self.cy,
+        )
 
     def normalize_points(self, pixel_coords: np.ndarray) -> np.ndarray:
         """Unproject image points to unit rays.
@@ -487,6 +493,32 @@ def _project_stereographic_points(
     return np.column_stack([focal_length * sx + cx, focal_length * sy + cy])
 
 
+def _project_raw_stereographic_points(
+    points_in_camera: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+) -> np.ndarray:
+    """Project camera-frame points with a raw stereographic model.
+
+    Args:
+        points_in_camera: Camera-frame target points, shape (N, 3).
+        fx: Focal length along x.
+        fy: Focal length along y.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Image coordinates, shape (N, 2).
+    """
+    ray_norm = np.linalg.norm(points_in_camera, axis=1)
+    denominator = ray_norm + points_in_camera[:, 2]
+    sx = 2.0 * points_in_camera[:, 0] / denominator
+    sy = 2.0 * points_in_camera[:, 1] / denominator
+    return np.column_stack([fx * sx + cx, fy * sy + cy])
+
+
 def _stereographic_front_mask(
     pixel_coords: np.ndarray,
     focal_length: float,
@@ -713,7 +745,7 @@ def _matching_opencv_model_from_stereographic(
 
 
 def _solve_pnp_all_frames_with_model(
-    model: OpenCV | PinholeSplined,
+    model: OpenCV | PinholeSplined | _RawStereographicSeed,
     target_points: np.ndarray,
     frames: list[Frame],
 ) -> tuple[list[Pose], list[bool], float]:
@@ -1356,7 +1388,7 @@ def _compute_spline_fov_from_seed_coverage(
         return fov_x, fov_y
 
     coverage = np.concatenate(stereographic_points)
-    tolerance = 1.10
+    tolerance = 1.03
     half_x = float(np.max(np.abs(coverage[:, 0]))) * tolerance
     half_y = float(np.max(np.abs(coverage[:, 1]))) * tolerance
     coverage_fov_x = float(np.degrees(4.0 * np.arctan(half_x / 2.0)))
@@ -1405,6 +1437,52 @@ def _fit_raw_stereographic_seed(
         cx=config.image_width / 2.0,
         cy=config.image_height / 2.0,
     )
+
+    seed_poses, seed_solved, _ = _solve_pnp_all_frames_stereographic(
+        focal_length,
+        target_points,
+        seed_frames,
+        seed_model.cx,
+        seed_model.cy,
+    )
+    solved_seed_frames: list[Frame] = []
+    solved_seed_poses: list[Pose] = []
+    for frame, camera_from_target, solved in zip(
+        seed_frames,
+        seed_poses,
+        seed_solved,
+    ):
+        if not solved:
+            continue
+        solved_seed_frames.append(frame)
+        solved_seed_poses.append(camera_from_target)
+
+    if solved_seed_frames:
+        seed_result = lbb.calibrate_raw_stereographic(
+            intrinsics_initial_value=[
+                seed_model.fx,
+                seed_model.fy,
+                seed_model.cx,
+                seed_model.cy,
+            ],
+            intrinsics_param_optimize_mask=[True, True, True, True],
+            cameras_from_target=[
+                camera_from_target._to_cpp()
+                for camera_from_target in solved_seed_poses
+            ],
+            target_points=list(target_points),
+            frames=[frame._to_cpp() for frame in solved_seed_frames],
+        )
+        seed_params = np.asarray(seed_result["intrinsics"], dtype=np.float64)
+        seed_model = _RawStereographicSeed(
+            image_height=config.image_height,
+            image_width=config.image_width,
+            fx=float(seed_params[0]),
+            fy=float(seed_params[1]),
+            cx=float(seed_params[2]),
+            cy=float(seed_params[3]),
+        )
+
     fov_x, fov_y = _compute_spline_grid_fov_from_raw_seed(seed_model)
     log(
         f"Fitted raw stereographic seed: {default_timer() - start_time:.1f}s "
@@ -1524,12 +1602,10 @@ def _calibrate_pinhole_splined(
 
     if initial_camera_model is None:
         seed_model = _fit_raw_stereographic_seed(target_points, frames, config)
-        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_stereographic(
-            seed_model.fx,
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            seed_model,
             target_points,
             frames,
-            seed_model.cx,
-            seed_model.cy,
         )
 
         if config.fov_deg_xy is not None:
@@ -1559,12 +1635,10 @@ def _calibrate_pinhole_splined(
         prior_model = initial_camera_model
         log("Using user-provided initial spline model")
         seed_model = _fit_raw_stereographic_seed(target_points, frames, config)
-        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_stereographic(
-            seed_model.fx,
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            seed_model,
             target_points,
             frames,
-            seed_model.cx,
-            seed_model.cy,
         )
 
     poses, inlier_masks, warp_coordinates = _prepare_spline_frame_state(

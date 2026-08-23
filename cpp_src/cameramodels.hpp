@@ -169,7 +169,7 @@ inline int clamp_int(
 
 // Convert normalized pinhole coordinates to stereographic projection.
 // Given p = (x, y) in normalized space:
-//   r = |p|, theta = arctan(r), p_stereo = (p / r) * 2 * tan(theta / 2)
+//   p_stereo = 2p / (sqrt(1 + |p|^2) + 1)
 template <typename T>
 static inline void normalized_to_stereographic(
     const T& x_normalized,
@@ -177,14 +177,10 @@ static inline void normalized_to_stereographic(
     T& x_stereo,
     T& y_stereo
 ) {
-    using std::atan;
     using std::sqrt;
-    using std::tan;
 
     const T r_sq = x_normalized * x_normalized + y_normalized * y_normalized;
-    const T r = sqrt(r_sq + T(1e-30));  // avoid division by zero
-    const T theta = atan(r);
-    const T scale = T(2) * tan(theta / T(2)) / r;
+    const T scale = T(2) / (sqrt(T(1) + r_sq) + T(1));
     x_stereo = x_normalized * scale;
     y_stereo = y_normalized * scale;
 }

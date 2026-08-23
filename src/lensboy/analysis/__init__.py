@@ -6,6 +6,11 @@ try:
         plot_projection_diff,
         plot_undistortion,
     )
+    from lensboy.analysis.uncertainty import (
+        ProjectionUncertainty,
+        compute_projection_uncertainty,
+        plot_projection_uncertainty,
+    )
     from lensboy.analysis.unproject_lut import (
         UnprojectLUTErrorHeatmap,
         compute_lut_error_heatmap,
@@ -23,5 +28,8 @@ __all__ = [
     "plot_detection_coverage",
     "plot_distortion_grid",
     "plot_projection_diff",
+    "ProjectionUncertainty",
+    "compute_projection_uncertainty",
+    "plot_projection_uncertainty",
     "plot_undistortion",
 ]
