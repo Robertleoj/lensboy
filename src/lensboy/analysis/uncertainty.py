@@ -7,7 +7,9 @@ import numpy as np
 
 from lensboy import lensboy_bindings as lbb
 from lensboy.camera_models.opencv import OpenCV
+from lensboy.camera_models.opencv import OpenCVConfig
 from lensboy.camera_models.pinhole_splined import PinholeSplined
+from lensboy.camera_models.pinhole_splined import PinholeSplinedConfig
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -73,13 +75,38 @@ def _active_calibration_data(
     return cameras_from_target, frames
 
 
+def _alignment_rays_for_model(model: OpenCV) -> np.ndarray:
+    """Sample image-space rays used to quotient OpenCV frame rotation.
+
+    Args:
+        model: Fitted OpenCV model.
+
+    Returns:
+        Camera-frame rays on a fixed image grid, shape (N, 3).
+    """
+    grid_density = 60
+    w, h = model.image_width, model.image_height
+    aspect = w / h
+    if w >= h:
+        nx = grid_density
+        ny = max(2, round(grid_density / aspect))
+    else:
+        ny = grid_density
+        nx = max(2, round(grid_density * aspect))
+
+    x = np.linspace(0, w - 1, nx)
+    y = np.linspace(0, h - 1, ny)
+    xx, yy = np.meshgrid(x, y)
+    pixels = np.column_stack([xx.ravel(), yy.ravel()])
+    return np.ascontiguousarray(model.normalize_points(pixels), dtype=np.float64)
+
+
 def compute_projection_uncertainty(
     result: CalibrationResult,
     rays: np.ndarray,
     *,
     damping: float = 1e-9,
     relative_eigen_floor: float = 1e-12,
-    spline_smoothness_lambda: float = 1.0,
 ) -> ProjectionUncertainty:
     """Estimate output-space projection uncertainty for camera rays.
 
@@ -88,7 +115,6 @@ def compute_projection_uncertainty(
         rays: Query camera-frame rays or points, shape (N, 3).
         damping: Absolute eigenvalue floor used in Hessian solves.
         relative_eigen_floor: Relative eigenvalue floor used in Hessian solves.
-        spline_smoothness_lambda: Smoothness prior used for spline Hessian regularization.
 
     Returns:
         Projection uncertainty with full 2D pixel covariance per ray.
@@ -106,18 +132,26 @@ def compute_projection_uncertainty(
 
     model = result.camera_model
     if isinstance(model, OpenCV):
+        if not isinstance(result.calibration_config, OpenCVConfig):
+            raise TypeError("OpenCV uncertainty requires an OpenCV calibration config.")
         native = lbb.projection_uncertainty_opencv(
             intrinsics=model._params(),
+            intrinsics_param_optimize_mask=result.calibration_config.optimize_mask().tolist(),
             cameras_from_target=[pose._to_cpp() for pose in cameras_from_target],
             target_points=list(result.target_points),
             frames=[frame._to_cpp() for frame in frames],
             warp_coordinates=warp_coordinates,
             warp_coeffs_initial=warp_coeffs,
             query_rays=query_rays,
+            alignment_rays=_alignment_rays_for_model(model),
             damping=damping,
             relative_eigen_floor=relative_eigen_floor,
         )
     elif isinstance(model, PinholeSplined):
+        if not isinstance(result.calibration_config, PinholeSplinedConfig):
+            raise TypeError(
+                "PinholeSplined uncertainty requires a PinholeSplined calibration config."
+            )
         native = lbb.projection_uncertainty_pinhole_splined(
             model_config=lbb.PinholeSplinedOptimizationConfig(
                 model.image_width,
@@ -126,7 +160,7 @@ def compute_projection_uncertainty(
                 model.fov_deg_y,
                 model.num_knots_x,
                 model.num_knots_y,
-                spline_smoothness_lambda,
+                result.calibration_config.smoothness_lambda,
             ),
             intrinsics_parameters=model._cpp_params(),
             cameras_from_target=[pose._to_cpp() for pose in cameras_from_target],
@@ -157,7 +191,6 @@ def plot_projection_uncertainty(
     return_figure: bool = False,
     damping: float = 1e-9,
     relative_eigen_floor: float = 1e-12,
-    spline_smoothness_lambda: float = 1.0,
 ) -> Figure | None:
     """Plot a pixel-space heatmap of ray projection uncertainty.
 
@@ -168,7 +201,6 @@ def plot_projection_uncertainty(
         return_figure: If True, return the figure instead of showing it.
         damping: Absolute eigenvalue floor used in Hessian solves.
         relative_eigen_floor: Relative eigenvalue floor used in Hessian solves.
-        spline_smoothness_lambda: Smoothness prior used for spline Hessian regularization.
 
     Returns:
         The figure if requested, otherwise None.
@@ -195,7 +227,6 @@ def plot_projection_uncertainty(
         rays,
         damping=damping,
         relative_eigen_floor=relative_eigen_floor,
-        spline_smoothness_lambda=spline_smoothness_lambda,
     )
     return _plot_projection_uncertainty(
         uncertainty.trace_std_px.reshape(ny, nx),

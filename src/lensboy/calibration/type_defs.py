@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 from lensboy import lensboy_bindings as lbb
+from lensboy.camera_models.base_model import CameraModelConfig
 from lensboy.camera_models.opencv import OpenCV
 from lensboy.camera_models.pinhole_splined import (
     PinholeSplined,
@@ -194,6 +195,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
         frame_diagnostics: Per-image reprojection diagnostics, one per input image.
         frames: Input detection frames used for calibration.
         target_points: 3D calibration target points, shape (M, 3).
+        calibration_config: Configuration used to fit the calibrated model.
         target_warp: Estimated target warp, or None if not estimated.
     """
 
@@ -202,6 +204,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
     frame_diagnostics: list[FrameDiagnostics | None]
     frames: list[Frame]
     target_points: np.ndarray
+    calibration_config: CameraModelConfig
     target_warp: TargetWarp | None = None
 
     def __repr__(self) -> str:
@@ -333,7 +336,6 @@ class CalibrationResult(Generic[IntrinsicsT]):
         *,
         damping: float = 1e-9,
         relative_eigen_floor: float = 1e-12,
-        spline_smoothness_lambda: float = 1.0,
     ):
         """Estimate output-space projection uncertainty for camera rays.
 
@@ -341,8 +343,6 @@ class CalibrationResult(Generic[IntrinsicsT]):
             rays: Camera-frame rays or points, shape (N, 3).
             damping: Absolute eigenvalue floor used in Hessian solves.
             relative_eigen_floor: Relative eigenvalue floor used in Hessian solves.
-            spline_smoothness_lambda: Smoothness prior used for spline Hessian
-                regularization.
 
         Returns:
             Projection uncertainty containing a 2x2 pixel covariance per ray.
@@ -354,7 +354,6 @@ class CalibrationResult(Generic[IntrinsicsT]):
             rays,
             damping=damping,
             relative_eigen_floor=relative_eigen_floor,
-            spline_smoothness_lambda=spline_smoothness_lambda,
         )
 
     def plot_projection_uncertainty(
@@ -365,7 +364,6 @@ class CalibrationResult(Generic[IntrinsicsT]):
         return_figure: bool = False,
         damping: float = 1e-9,
         relative_eigen_floor: float = 1e-12,
-        spline_smoothness_lambda: float = 1.0,
     ) -> Figure | None:
         """Plot ray projection uncertainty over the image.
 
@@ -375,8 +373,6 @@ class CalibrationResult(Generic[IntrinsicsT]):
             return_figure: If True, return the figure instead of showing it.
             damping: Absolute eigenvalue floor used in Hessian solves.
             relative_eigen_floor: Relative eigenvalue floor used in Hessian solves.
-            spline_smoothness_lambda: Smoothness prior used for spline Hessian
-                regularization.
 
         Returns:
             The figure if requested, otherwise None.
@@ -390,7 +386,6 @@ class CalibrationResult(Generic[IntrinsicsT]):
             return_figure=return_figure,
             damping=damping,
             relative_eigen_floor=relative_eigen_floor,
-            spline_smoothness_lambda=spline_smoothness_lambda,
         )
 
     def plot_outliers(

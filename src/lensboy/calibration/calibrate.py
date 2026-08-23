@@ -1150,6 +1150,7 @@ def _opencv_calibrate(
         frame_diagnostics=diagnostics,
         frames=list(frames),
         target_points=target_points,
+        calibration_config=config,
         target_warp=target_warp,
     )
 
@@ -1691,6 +1692,7 @@ def _calibrate_pinhole_splined(
         frame_diagnostics=diagnostics,
         frames=list(frames),
         target_points=target_points,
+        calibration_config=config,
         target_warp=target_warp,
     )
 

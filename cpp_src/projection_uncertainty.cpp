@@ -589,16 +589,28 @@ void add_spline_smoothness_hessian(
 py::dict finish_uncertainty(
     const ProfiledSystem& profiled,
     const std::vector<Matrix>& query_jacobians,
+    const std::vector<Matrix>* query_rotation_bases,
+    const std::vector<Matrix>* alignment_jacobians,
+    const std::vector<Matrix>* alignment_rotation_bases,
     double damping,
     double relative_floor
 ) {
     const int num_queries = static_cast<int>(query_jacobians.size());
     const int num_groups = static_cast<int>(profiled.gradients.rows());
+    int num_alignment_queries = 0;
+    if (alignment_jacobians != nullptr) {
+        num_alignment_queries = static_cast<int>(alignment_jacobians->size());
+    }
 
-    Matrix rhs(profiled.hessian.rows(), num_queries * 2);
+    Matrix rhs(profiled.hessian.rows(), (num_queries + num_alignment_queries) * 2);
     for (int q = 0; q < num_queries; q++) {
         rhs.col(2 * q + 0) = query_jacobians[q].row(0).transpose();
         rhs.col(2 * q + 1) = query_jacobians[q].row(1).transpose();
+    }
+    for (int q = 0; q < num_alignment_queries; q++) {
+        const int col = 2 * (num_queries + q);
+        rhs.col(col + 0) = (*alignment_jacobians)[q].row(0).transpose();
+        rhs.col(col + 1) = (*alignment_jacobians)[q].row(1).transpose();
     }
 
     py::dict metadata = profiled.metadata;
@@ -638,6 +650,50 @@ py::dict finish_uncertainty(
             z(q, 1) = empirical_gradients.row(g).dot(solved.col(2 * q + 1));
         }
         z_by_group.push_back(z);
+    }
+
+    if (query_rotation_bases != nullptr && alignment_jacobians != nullptr &&
+        alignment_rotation_bases != nullptr && !alignment_rotation_bases->empty()) {
+        require(
+            static_cast<int>(query_rotation_bases->size()) == num_queries,
+            "Query rotation quotient basis count must match query count."
+        );
+        require(
+            static_cast<int>(alignment_rotation_bases->size()) == num_alignment_queries,
+            "Alignment rotation quotient basis count must match alignment query count."
+        );
+        Matrix query_basis(2 * num_queries, 3);
+        for (int q = 0; q < num_queries; q++) {
+            query_basis.block(2 * q, 0, 2, 3) = (*query_rotation_bases)[q];
+        }
+        Matrix alignment_basis(2 * num_alignment_queries, 3);
+        for (int q = 0; q < num_alignment_queries; q++) {
+            alignment_basis.block(2 * q, 0, 2, 3) = (*alignment_rotation_bases)[q];
+        }
+        Eigen::CompleteOrthogonalDecomposition<Matrix> decomposition(alignment_basis);
+        for (int g = 0; g < num_groups; g++) {
+            Vector z_alignment(2 * num_alignment_queries);
+            const int alignment_col_offset = 2 * num_queries;
+            for (int q = 0; q < num_alignment_queries; q++) {
+                z_alignment[2 * q + 0] = empirical_gradients.row(g).dot(
+                    solved.col(alignment_col_offset + 2 * q + 0)
+                );
+                z_alignment[2 * q + 1] = empirical_gradients.row(g).dot(
+                    solved.col(alignment_col_offset + 2 * q + 1)
+                );
+            }
+            const Vector rotation = decomposition.solve(z_alignment);
+            Vector z_query(2 * num_queries);
+            for (int q = 0; q < num_queries; q++) {
+                z_query[2 * q + 0] = z_by_group[g](q, 0);
+                z_query[2 * q + 1] = z_by_group[g](q, 1);
+            }
+            const Vector aligned = z_query - query_basis * rotation;
+            for (int q = 0; q < num_queries; q++) {
+                z_by_group[g](q, 0) = aligned[2 * q + 0];
+                z_by_group[g](q, 1) = aligned[2 * q + 1];
+            }
+        }
     }
 
     py::array_t<double> cov_array({num_queries, 2, 2});
@@ -680,20 +736,48 @@ std::vector<Vec3<double>> read_rays(
     return rays;
 }
 
+Matrix post_rotation_basis(
+    const Matrix& ray_jacobian,
+    const Vec3<double>& ray
+) {
+    Matrix tangent(3, 3);
+    tangent << 0.0, -ray[2], ray[1],
+        ray[2], 0.0, -ray[0],
+        -ray[1], ray[0], 0.0;
+    return ray_jacobian * tangent;
+}
+
 }  // namespace
 
 py::dict projection_uncertainty_opencv(
     std::vector<double>& intrinsics,
+    std::vector<bool>& intrinsics_param_optimize_mask,
     std::vector<Vec6<double>>& cameras_from_target,
     std::vector<Vec3<double>>& target_points,
     std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>& frames,
     py::array_t<double, py::array::c_style | py::array::forcecast> query_rays,
+    py::array_t<double, py::array::c_style | py::array::forcecast> alignment_rays,
     std::optional<WarpCoordinates> warp_coordinates,
     std::array<double, 5> warp_coeffs_initial,
     double damping,
     double relative_eigen_floor
 ) {
-    const int c_params = 18;
+    require(
+        intrinsics_param_optimize_mask.size() == 18,
+        "OpenCV uncertainty optimization mask must have length 18."
+    );
+    std::array<int, 18> active_intrinsic_columns{};
+    active_intrinsic_columns.fill(-1);
+    int c_params = 0;
+    for (int k = 0; k < 18; k++) {
+        if (!intrinsics_param_optimize_mask[k]) {
+            continue;
+        }
+        active_intrinsic_columns[k] = c_params;
+        c_params++;
+    }
+    require(c_params > 0, "OpenCV uncertainty needs at least one active intrinsic parameter.");
+
     const bool has_warp = warp_coordinates.has_value();
     const int n_params = static_cast<int>(6 * cameras_from_target.size()) +
                          (has_warp ? 5 : 0);
@@ -727,14 +811,22 @@ py::dict projection_uncertainty_opencv(
                 cost->Evaluate(blocks, residuals, jac);
                 delete cost;
                 std::vector<int> cols;
-                Matrix j(2, 29);
-                cols.reserve(29);
-                for (int k = 0; k < 18; k++) cols.push_back(k);
+                Matrix j(2, c_params + 11);
+                cols.reserve(c_params + 11);
+                int col = 0;
+                for (int k = 0; k < 18; k++) {
+                    if (active_intrinsic_columns[k] < 0) {
+                        continue;
+                    }
+                    cols.push_back(active_intrinsic_columns[k]);
+                    j.col(col) = map_ceres_jacobian(j_intr.data(), 2, 18).col(k);
+                    col++;
+                }
                 for (int k = 0; k < 6; k++) cols.push_back(c_params + 6 * frame_idx + k);
                 for (int k = 0; k < 5; k++) cols.push_back(c_params + 6 * frames.size() + k);
-                j << map_ceres_jacobian(j_intr.data(), 2, 18),
-                    map_ceres_jacobian(j_cam.data(), 2, 6),
-                    map_ceres_jacobian(j_warp.data(), 2, 5);
+                j.block(0, col, 2, 6) = map_ceres_jacobian(j_cam.data(), 2, 6);
+                col += 6;
+                j.block(0, col, 2, 5) = map_ceres_jacobian(j_warp.data(), 2, 5);
                 accumulate_residual(hessian, group_gradients, cols, j, residuals, frame_idx);
             } else {
                 auto* cost = new ceres::AutoDiffCostFunction<
@@ -749,12 +841,19 @@ py::dict projection_uncertainty_opencv(
                 cost->Evaluate(blocks, residuals, jac);
                 delete cost;
                 std::vector<int> cols;
-                Matrix j(2, 24);
-                cols.reserve(24);
-                for (int k = 0; k < 18; k++) cols.push_back(k);
+                Matrix j(2, c_params + 6);
+                cols.reserve(c_params + 6);
+                int col = 0;
+                for (int k = 0; k < 18; k++) {
+                    if (active_intrinsic_columns[k] < 0) {
+                        continue;
+                    }
+                    cols.push_back(active_intrinsic_columns[k]);
+                    j.col(col) = map_ceres_jacobian(j_intr.data(), 2, 18).col(k);
+                    col++;
+                }
                 for (int k = 0; k < 6; k++) cols.push_back(c_params + 6 * frame_idx + k);
-                j << map_ceres_jacobian(j_intr.data(), 2, 18),
-                    map_ceres_jacobian(j_cam.data(), 2, 6);
+                j.block(0, col, 2, 6) = map_ceres_jacobian(j_cam.data(), 2, 6);
                 accumulate_residual(hessian, group_gradients, cols, j, residuals, frame_idx);
             }
         }
@@ -770,7 +869,9 @@ py::dict projection_uncertainty_opencv(
 
     std::vector<Vec3<double>> rays = read_rays(query_rays);
     std::vector<Matrix> query_jacobians;
+    std::vector<Matrix> rotation_bases;
     query_jacobians.reserve(rays.size());
+    rotation_bases.reserve(rays.size());
 
     for (const auto& ray : rays) {
         auto* cost = new ceres::AutoDiffCostFunction<OpenCVProjectRay, 2, 18, 3>(
@@ -780,18 +881,69 @@ py::dict projection_uncertainty_opencv(
         double* blocks[2] = {intrinsics.data(), ray_copy.data()};
         double residuals[2];
         std::array<double, 2 * 18> j_intr{};
-        double* jac[2] = {j_intr.data(), nullptr};
+        std::array<double, 2 * 3> j_ray{};
+        double* jac[2] = {j_intr.data(), j_ray.data()};
         cost->Evaluate(blocks, residuals, jac);
         delete cost;
-        query_jacobians.push_back(map_ceres_jacobian(j_intr.data(), 2, 18));
+        Matrix j_active(2, c_params);
+        int col = 0;
+        for (int k = 0; k < 18; k++) {
+            if (active_intrinsic_columns[k] < 0) {
+                continue;
+            }
+            j_active.col(col) = map_ceres_jacobian(j_intr.data(), 2, 18).col(k);
+            col++;
+        }
+        query_jacobians.push_back(j_active);
+        rotation_bases.push_back(
+            post_rotation_basis(map_ceres_jacobian(j_ray.data(), 2, 3), ray)
+        );
     }
 
-    return finish_uncertainty(
+    std::vector<Vec3<double>> alignment_ray_values = read_rays(alignment_rays);
+    std::vector<Matrix> alignment_jacobians;
+    std::vector<Matrix> alignment_rotation_bases;
+    alignment_jacobians.reserve(alignment_ray_values.size());
+    alignment_rotation_bases.reserve(alignment_ray_values.size());
+    for (const auto& ray : alignment_ray_values) {
+        auto* cost = new ceres::AutoDiffCostFunction<OpenCVProjectRay, 2, 18, 3>(
+            new OpenCVProjectRay{ray}
+        );
+        Vec3<double> ray_copy = ray;
+        double* blocks[2] = {intrinsics.data(), ray_copy.data()};
+        double residuals[2];
+        std::array<double, 2 * 18> j_intr{};
+        std::array<double, 2 * 3> j_ray{};
+        double* jac[2] = {j_intr.data(), j_ray.data()};
+        cost->Evaluate(blocks, residuals, jac);
+        delete cost;
+        Matrix j_active(2, c_params);
+        int col = 0;
+        for (int k = 0; k < 18; k++) {
+            if (active_intrinsic_columns[k] < 0) {
+                continue;
+            }
+            j_active.col(col) = map_ceres_jacobian(j_intr.data(), 2, 18).col(k);
+            col++;
+        }
+        alignment_jacobians.push_back(j_active);
+        alignment_rotation_bases.push_back(
+            post_rotation_basis(map_ceres_jacobian(j_ray.data(), 2, 3), ray)
+        );
+    }
+
+    py::dict out = finish_uncertainty(
         profiled,
         query_jacobians,
+        &rotation_bases,
+        &alignment_jacobians,
+        &alignment_rotation_bases,
         damping,
         relative_eigen_floor
     );
+    out["metadata"].cast<py::dict>()["opencv_active_intrinsic_params"] = c_params;
+    out["metadata"].cast<py::dict>()["opencv_inactive_intrinsic_params"] = 18 - c_params;
+    return out;
 }
 
 py::dict projection_uncertainty_pinhole_splined(
@@ -920,6 +1072,9 @@ py::dict projection_uncertainty_pinhole_splined(
     py::dict out = finish_uncertainty(
         profiled,
         query_jacobians,
+        nullptr,
+        nullptr,
+        nullptr,
         damping,
         relative_eigen_floor
     );

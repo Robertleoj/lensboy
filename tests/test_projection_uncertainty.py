@@ -73,6 +73,8 @@ def test_opencv_projection_uncertainty_shape_and_grouping() -> None:
     assert uncertainty.covariances_px.shape == (3, 2, 2)
     assert uncertainty.trace_std_px.shape == (3,)
     assert uncertainty.metadata["num_groups"] == 7
+    assert uncertainty.metadata["opencv_active_intrinsic_params"] == 4
+    assert uncertainty.metadata["opencv_inactive_intrinsic_params"] == 14
     _check_covariances(uncertainty.covariances_px)
 
 
@@ -90,15 +92,17 @@ def test_spline_projection_uncertainty_shape() -> None:
     )
     frames = _make_frames(model, target_points, num_frames=8, seed=2)
 
+    config = lb.PinholeSplinedConfig(
+        image_height=480,
+        image_width=640,
+        num_knots_x=8,
+        num_knots_y=6,
+        smoothness_lambda=2.5,
+    )
     result = lb.calibrate_camera(
         target_points,
         frames,
-        lb.PinholeSplinedConfig(
-            image_height=480,
-            image_width=640,
-            num_knots_x=8,
-            num_knots_y=6,
-        ),
+        config,
         estimate_target_warp=False,
         outlier_threshold_stddevs=None,
     )
@@ -108,6 +112,7 @@ def test_spline_projection_uncertainty_shape() -> None:
 
     assert uncertainty.covariances_px.shape == (2, 2, 2)
     assert uncertainty.metadata["fixed_pinhole_parameters"] is True
+    assert uncertainty.metadata["spline_smoothness_lambda"] == 2.5
     _check_covariances(uncertainty.covariances_px)
 
 

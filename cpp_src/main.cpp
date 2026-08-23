@@ -290,10 +290,12 @@ PYBIND11_MODULE(
         "projection_uncertainty_opencv",
         &lensboy::projection_uncertainty_opencv,
         py::arg("intrinsics"),
+        py::arg("intrinsics_param_optimize_mask"),
         py::arg("cameras_from_target"),
         py::arg("target_points"),
         py::arg("frames"),
         py::arg("query_rays"),
+        py::arg("alignment_rays"),
         py::arg("warp_coordinates") = py::none(),
         py::arg("warp_coeffs_initial") =
             std::array<double, 5>{0.0, 0.0, 0.0, 0.0, 0.0},
