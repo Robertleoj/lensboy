@@ -298,6 +298,7 @@ struct SplineProjectRay {
 using Matrix = Eigen::MatrixXd;
 using Vector = Eigen::VectorXd;
 using RowMajorMatrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+constexpr double rotation_quotient_relative_rank_tol = 1e-10;
 
 Matrix map_ceres_jacobian(
     const double* data,
@@ -592,6 +593,7 @@ py::dict finish_uncertainty(
     const std::vector<Matrix>* query_rotation_bases,
     const std::vector<Matrix>* alignment_jacobians,
     const std::vector<Matrix>* alignment_rotation_bases,
+    const std::vector<int>* alignment_group_sizes,
     double damping,
     double relative_floor
 ) {
@@ -653,7 +655,10 @@ py::dict finish_uncertainty(
     }
 
     if (query_rotation_bases != nullptr && alignment_jacobians != nullptr &&
-        alignment_rotation_bases != nullptr && !alignment_rotation_bases->empty()) {
+        alignment_rotation_bases != nullptr && alignment_group_sizes != nullptr &&
+        !alignment_rotation_bases->empty()) {
+        // OpenCV only: remove each group's best-supported global camera-frame
+        // rotation, estimated from that group's own inlier rays.
         require(
             static_cast<int>(query_rotation_bases->size()) == num_queries,
             "Query rotation quotient basis count must match query count."
@@ -662,27 +667,75 @@ py::dict finish_uncertainty(
             static_cast<int>(alignment_rotation_bases->size()) == num_alignment_queries,
             "Alignment rotation quotient basis count must match alignment query count."
         );
+        require(
+            static_cast<int>(alignment_group_sizes->size()) == num_groups,
+            "Alignment rotation quotient group count must match gradient group count."
+        );
+        int total_group_alignment_queries = 0;
+        for (int size : *alignment_group_sizes) {
+            require(size > 0, "Alignment rotation quotient groups must be non-empty.");
+            total_group_alignment_queries += size;
+        }
+        require(
+            total_group_alignment_queries == num_alignment_queries,
+            "Alignment rotation quotient group sizes must sum to alignment query count."
+        );
         Matrix query_basis(2 * num_queries, 3);
         for (int q = 0; q < num_queries; q++) {
             query_basis.block(2 * q, 0, 2, 3) = (*query_rotation_bases)[q];
         }
-        Matrix alignment_basis(2 * num_alignment_queries, 3);
-        for (int q = 0; q < num_alignment_queries; q++) {
-            alignment_basis.block(2 * q, 0, 2, 3) = (*alignment_rotation_bases)[q];
-        }
-        Eigen::CompleteOrthogonalDecomposition<Matrix> decomposition(alignment_basis);
+        int alignment_offset = 0;
+        int rotation_rank_min = 3;
+        int rotation_rank_max = 0;
+        int rotation_rank_sum = 0;
         for (int g = 0; g < num_groups; g++) {
-            Vector z_alignment(2 * num_alignment_queries);
+            const int group_size = (*alignment_group_sizes)[g];
+            Matrix alignment_basis(2 * group_size, 3);
+            for (int q = 0; q < group_size; q++) {
+                alignment_basis.block(2 * q, 0, 2, 3) =
+                    (*alignment_rotation_bases)[alignment_offset + q];
+            }
+            Eigen::JacobiSVD<Matrix> svd(
+                alignment_basis,
+                Eigen::ComputeThinU | Eigen::ComputeThinV
+            );
+            const Vector singular_values = svd.singularValues();
+            double max_singular = 0.0;
+            if (singular_values.size() > 0) {
+                max_singular = singular_values.maxCoeff();
+            }
+            const double rank_tol = rotation_quotient_relative_rank_tol *
+                                    std::max(max_singular, 1.0);
+            int rank = 0;
+            for (int s = 0; s < singular_values.size(); s++) {
+                if (singular_values[s] > rank_tol) {
+                    rank++;
+                }
+            }
+            rotation_rank_min = std::min(rotation_rank_min, rank);
+            rotation_rank_max = std::max(rotation_rank_max, rank);
+            rotation_rank_sum += rank;
+
+            Vector z_alignment(2 * group_size);
             const int alignment_col_offset = 2 * num_queries;
-            for (int q = 0; q < num_alignment_queries; q++) {
+            for (int q = 0; q < group_size; q++) {
+                const int alignment_idx = alignment_offset + q;
                 z_alignment[2 * q + 0] = empirical_gradients.row(g).dot(
-                    solved.col(alignment_col_offset + 2 * q + 0)
+                    solved.col(alignment_col_offset + 2 * alignment_idx + 0)
                 );
                 z_alignment[2 * q + 1] = empirical_gradients.row(g).dot(
-                    solved.col(alignment_col_offset + 2 * q + 1)
+                    solved.col(alignment_col_offset + 2 * alignment_idx + 1)
                 );
             }
-            const Vector rotation = decomposition.solve(z_alignment);
+            Vector rotation = Vector::Zero(3);
+            if (rank > 0) {
+                const Matrix u_rank = svd.matrixU().leftCols(rank);
+                const Matrix v_rank = svd.matrixV().leftCols(rank);
+                const Vector s_rank = singular_values.head(rank);
+                rotation =
+                    v_rank * (s_rank.cwiseInverse().asDiagonal() *
+                              (u_rank.transpose() * z_alignment));
+            }
             Vector z_query(2 * num_queries);
             for (int q = 0; q < num_queries; q++) {
                 z_query[2 * q + 0] = z_by_group[g](q, 0);
@@ -693,7 +746,12 @@ py::dict finish_uncertainty(
                 z_by_group[g](q, 0) = aligned[2 * q + 0];
                 z_by_group[g](q, 1) = aligned[2 * q + 1];
             }
+            alignment_offset += group_size;
         }
+        metadata["rotation_quotient_rank_min"] = rotation_rank_min;
+        metadata["rotation_quotient_rank_max"] = rotation_rank_max;
+        metadata["rotation_quotient_rank_mean"] =
+            static_cast<double>(rotation_rank_sum) / static_cast<double>(num_groups);
     }
 
     py::array_t<double> cov_array({num_queries, 2, 2});
@@ -757,6 +815,7 @@ py::dict projection_uncertainty_opencv(
     std::vector<std::tuple<std::vector<int32_t>, std::vector<Vec2<double>>>>& frames,
     py::array_t<double, py::array::c_style | py::array::forcecast> query_rays,
     py::array_t<double, py::array::c_style | py::array::forcecast> alignment_rays,
+    std::vector<int>& alignment_group_sizes,
     std::optional<WarpCoordinates> warp_coordinates,
     std::array<double, 5> warp_coeffs_initial,
     double damping,
@@ -938,6 +997,7 @@ py::dict projection_uncertainty_opencv(
         &rotation_bases,
         &alignment_jacobians,
         &alignment_rotation_bases,
+        &alignment_group_sizes,
         damping,
         relative_eigen_floor
     );
@@ -1072,6 +1132,7 @@ py::dict projection_uncertainty_pinhole_splined(
     py::dict out = finish_uncertainty(
         profiled,
         query_jacobians,
+        nullptr,
         nullptr,
         nullptr,
         nullptr,

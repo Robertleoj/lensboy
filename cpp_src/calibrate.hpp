@@ -72,6 +72,7 @@ py::dict projection_uncertainty_opencv(
         frames,
     py::array_t<double, py::array::c_style | py::array::forcecast> query_rays,
     py::array_t<double, py::array::c_style | py::array::forcecast> alignment_rays,
+    std::vector<int>& alignment_group_sizes,
     std::optional<WarpCoordinates> warp_coordinates,
     std::array<double, 5> warp_coeffs_initial,
     double damping,

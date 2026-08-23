@@ -75,30 +75,27 @@ def _active_calibration_data(
     return cameras_from_target, frames
 
 
-def _alignment_rays_for_model(model: OpenCV) -> np.ndarray:
-    """Sample image-space rays used to quotient OpenCV frame rotation.
+def _opencv_alignment_rays_by_frame(
+    model: OpenCV,
+    frames: list[Frame],
+) -> tuple[np.ndarray, list[int]]:
+    """Collect data-supported rays used to quotient OpenCV frame rotation.
 
     Args:
         model: Fitted OpenCV model.
+        frames: Final inlier calibration detections.
 
     Returns:
-        Camera-frame rays on a fixed image grid, shape (N, 3).
+        Camera-frame rays for final inlier detections, shape (N, 3), and
+        the number of rays in each calibration frame.
     """
-    grid_density = 60
-    w, h = model.image_width, model.image_height
-    aspect = w / h
-    if w >= h:
-        nx = grid_density
-        ny = max(2, round(grid_density / aspect))
-    else:
-        ny = grid_density
-        nx = max(2, round(grid_density * aspect))
-
-    x = np.linspace(0, w - 1, nx)
-    y = np.linspace(0, h - 1, ny)
-    xx, yy = np.meshgrid(x, y)
-    pixels = np.column_stack([xx.ravel(), yy.ravel()])
-    return np.ascontiguousarray(model.normalize_points(pixels), dtype=np.float64)
+    group_sizes = [len(frame) for frame in frames]
+    pixels = np.concatenate(
+        [frame.detected_points_in_image for frame in frames],
+        axis=0,
+    )
+    rays = np.ascontiguousarray(model.normalize_points(pixels), dtype=np.float64)
+    return rays, group_sizes
 
 
 def compute_projection_uncertainty(
@@ -134,6 +131,10 @@ def compute_projection_uncertainty(
     if isinstance(model, OpenCV):
         if not isinstance(result.calibration_config, OpenCVConfig):
             raise TypeError("OpenCV uncertainty requires an OpenCV calibration config.")
+        alignment_rays, alignment_group_sizes = _opencv_alignment_rays_by_frame(
+            model,
+            frames,
+        )
         native = lbb.projection_uncertainty_opencv(
             intrinsics=model._params(),
             intrinsics_param_optimize_mask=result.calibration_config.optimize_mask().tolist(),
@@ -143,7 +144,8 @@ def compute_projection_uncertainty(
             warp_coordinates=warp_coordinates,
             warp_coeffs_initial=warp_coeffs,
             query_rays=query_rays,
-            alignment_rays=_alignment_rays_for_model(model),
+            alignment_rays=alignment_rays,
+            alignment_group_sizes=alignment_group_sizes,
             damping=damping,
             relative_eigen_floor=relative_eigen_floor,
         )

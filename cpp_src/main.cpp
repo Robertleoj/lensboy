@@ -296,6 +296,7 @@ PYBIND11_MODULE(
         py::arg("frames"),
         py::arg("query_rays"),
         py::arg("alignment_rays"),
+        py::arg("alignment_group_sizes"),
         py::arg("warp_coordinates") = py::none(),
         py::arg("warp_coeffs_initial") =
             std::array<double, 5>{0.0, 0.0, 0.0, 0.0, 0.0},
