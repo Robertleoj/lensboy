@@ -2193,6 +2193,91 @@ def plot_projection_diff(
     return None
 
 
+def _plot_projection_uncertainty(
+    heatmap: np.ndarray,
+    *,
+    image_width: int,
+    image_height: int,
+    heatmap_max: float | None,
+    return_figure: bool,
+) -> Figure | None:
+    """Plot projection uncertainty as an image-space heatmap.
+
+    Args:
+        heatmap: Scalar uncertainty values, shape (H, W).
+        image_width: Image width in pixels.
+        image_height: Image height in pixels.
+        heatmap_max: Color scale ceiling in pixels.
+        return_figure: If True, return the figure instead of showing it.
+
+    Returns:
+        Figure when requested, otherwise None.
+    """
+    if heatmap_max is None:
+        finite = heatmap[np.isfinite(heatmap)]
+        heatmap_max = float(3 * np.median(finite))
+        if heatmap_max <= 0.0:
+            heatmap_max = float(np.max(finite))
+
+    bg = "#111111"
+    fg = "white"
+    aspect = image_height / image_width
+    fig, ax = plt.subplots(
+        1,
+        1,
+        figsize=(10, 10 * aspect),
+        constrained_layout=True,
+    )
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+    ax.tick_params(colors=fg)
+    ax.xaxis.label.set_color(fg)
+    ax.yaxis.label.set_color(fg)
+    ax.title.set_color(fg)
+    for spine in ax.spines.values():
+        spine.set_color(fg)
+
+    im = ax.imshow(
+        heatmap,
+        cmap="inferno",
+        vmin=0,
+        vmax=heatmap_max,
+        extent=[0, image_width, image_height, 0],  # type: ignore
+        aspect="auto",
+    )
+
+    contour_levels = _125_levels(heatmap_max)
+    if len(contour_levels) > 0:
+        contour_x = np.linspace(0, image_width, heatmap.shape[1])
+        contour_y = np.linspace(0, image_height, heatmap.shape[0])
+        cs = ax.contour(
+            contour_x,
+            contour_y,
+            heatmap,
+            levels=contour_levels,
+            colors="white",
+            linewidths=0.6,
+            alpha=0.7,
+        )
+        ax.clabel(cs, inline=True, fontsize=8, fmt="%g")  # type: ignore
+
+    cbar: Colorbar = fig.colorbar(im, ax=ax, shrink=0.8, fraction=0.03, pad=0.01)
+    cbar.set_label("projection uncertainty sqrt(trace Σ) [px]", color=fg)
+    cbar.ax.tick_params(colors=fg)
+
+    ax.set_xlim(0, image_width)
+    ax.set_ylim(image_height, 0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x [px]")
+    ax.set_ylabel("y [px]")
+    ax.set_title("Projection uncertainty")
+
+    if return_figure:
+        return fig
+    plt.show()
+    return None
+
+
 def _plot_unproject_lut_error_heatmap(
     heatmap: UnprojectLUTErrorHeatmap,
     *,

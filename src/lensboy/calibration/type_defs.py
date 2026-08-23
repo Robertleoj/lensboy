@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 from lensboy import lensboy_bindings as lbb
+from lensboy.camera_models.base_model import CameraModelConfig
 from lensboy.camera_models.opencv import OpenCV
 from lensboy.camera_models.pinhole_splined import (
     PinholeSplined,
@@ -194,6 +195,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
         frame_diagnostics: Per-image reprojection diagnostics, one per input image.
         frames: Input detection frames used for calibration.
         target_points: 3D calibration target points, shape (M, 3).
+        calibration_config: Configuration used to fit the calibrated model.
         target_warp: Estimated target warp, or None if not estimated.
     """
 
@@ -202,6 +204,7 @@ class CalibrationResult(Generic[IntrinsicsT]):
     frame_diagnostics: list[FrameDiagnostics | None]
     frames: list[Frame]
     target_points: np.ndarray
+    calibration_config: CameraModelConfig
     target_warp: TargetWarp | None = None
 
     def __repr__(self) -> str:
@@ -325,6 +328,64 @@ class CalibrationResult(Generic[IntrinsicsT]):
             s=s,
             grid_cells=grid_cells,
             return_figure=return_figure,
+        )
+
+    def projection_uncertainty(
+        self,
+        rays: np.ndarray,
+        *,
+        damping: float = 1e-9,
+        relative_eigen_floor: float = 1e-12,
+    ):
+        """Estimate output-space projection uncertainty for camera rays.
+
+        Args:
+            rays: Camera-frame rays or points, shape (N, 3).
+            damping: Absolute eigenvalue floor used in Hessian solves.
+            relative_eigen_floor: Relative eigenvalue floor used in Hessian solves.
+
+        Returns:
+            Projection uncertainty containing a 2x2 pixel covariance per ray.
+        """
+        from lensboy.analysis.uncertainty import compute_projection_uncertainty
+
+        return compute_projection_uncertainty(
+            self,
+            rays,
+            damping=damping,
+            relative_eigen_floor=relative_eigen_floor,
+        )
+
+    def plot_projection_uncertainty(
+        self,
+        *,
+        heatmap_max: float | None = None,
+        grid_density: int = 200,
+        return_figure: bool = False,
+        damping: float = 1e-9,
+        relative_eigen_floor: float = 1e-12,
+    ) -> Figure | None:
+        """Plot ray projection uncertainty over the image.
+
+        Args:
+            heatmap_max: Color scale ceiling in pixels.
+            grid_density: Number of grid samples along the longer image axis.
+            return_figure: If True, return the figure instead of showing it.
+            damping: Absolute eigenvalue floor used in Hessian solves.
+            relative_eigen_floor: Relative eigenvalue floor used in Hessian solves.
+
+        Returns:
+            The figure if requested, otherwise None.
+        """
+        from lensboy.analysis.uncertainty import plot_projection_uncertainty
+
+        return plot_projection_uncertainty(
+            self,
+            heatmap_max=heatmap_max,
+            grid_density=grid_density,
+            return_figure=return_figure,
+            damping=damping,
+            relative_eigen_floor=relative_eigen_floor,
         )
 
     def plot_outliers(

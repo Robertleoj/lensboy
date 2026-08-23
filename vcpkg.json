@@ -2,7 +2,9 @@
     "dependencies": [
         {
             "name": "ceres",
-            "features": [],
+            "features": [
+                "eigensparse"
+            ],
             "default-features": false
         },
         "fmt",

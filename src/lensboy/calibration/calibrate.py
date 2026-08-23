@@ -28,6 +28,8 @@ from lensboy.geometry.pose import Pose
 
 DEFAULT_OUTLIER_THRESHOLD = 5.0
 MAX_OUTLIER_FILTER_PASSES = 2
+FOCAL_SWEEP_MAX_FRAMES = 20
+SEED_FIT_MAX_FRAMES = 20
 
 
 @dataclass
@@ -47,6 +49,60 @@ class _OptimizationState(Generic[IntrinsicsT]):
     frames: list[Frame]
     warp_coeffs: tuple[float, float, float, float, float] | None
     inlier_masks: list[np.ndarray | None]
+
+
+@dataclass
+class _PnPFrameData:
+    object_points: np.ndarray
+    image_points: np.ndarray
+
+
+@dataclass
+class _RawStereographicSeed:
+    image_height: int
+    image_width: int
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+
+    def project_points(self, points_in_camera: np.ndarray) -> np.ndarray:
+        """Project camera-frame points with the raw stereographic seed.
+
+        Args:
+            points_in_camera: Camera-frame points, shape (N, 3).
+
+        Returns:
+            Image coordinates, shape (N, 2).
+        """
+        return _project_raw_stereographic_points(
+            points_in_camera,
+            self.fx,
+            self.fy,
+            self.cx,
+            self.cy,
+        )
+
+    def normalize_points(self, pixel_coords: np.ndarray) -> np.ndarray:
+        """Unproject image points to unit rays.
+
+        Args:
+            pixel_coords: Image coordinates, shape (N, 2).
+
+        Returns:
+            Unit rays in camera coordinates, shape (N, 3).
+        """
+        sx = (pixel_coords[:, 0] - self.cx) / self.fx
+        sy = (pixel_coords[:, 1] - self.cy) / self.fy
+        radius2 = sx * sx + sy * sy
+        denom = 4.0 + radius2
+        return np.column_stack(
+            [
+                4.0 * sx / denom,
+                4.0 * sy / denom,
+                (4.0 - radius2) / denom,
+            ]
+        )
 
 
 def _project_and_calculate_residuals(
@@ -272,21 +328,8 @@ def _run_with_outlier_filtering(
             curr_target_warp = TargetWarp(warp_coordinates, state.warp_coeffs)
 
         elapsed = default_timer() - start
-        mean_reproj, worst_reproj = _compute_mean_reproj(
-            state,
-            target_points,
-            curr_target_warp,
-        )
-        log(
-            f"{label} pass {pass_num}: {elapsed:.1f}s "
-            f"(mean reproj={mean_reproj:.3f}px, worst={worst_reproj:.3f}px)"
-        )
-
-        if outlier_threshold_stddevs is None or iteration == MAX_OUTLIER_FILTER_PASSES:
-            break
-
-        # Compute residuals and update masks
         residuals = []
+        inlier_norms = []
         for i in active_indices:
             pose = state.cameras_from_target[i]
             assert pose is not None
@@ -298,6 +341,23 @@ def _run_with_outlier_filtering(
                 curr_target_warp,
             )
             residuals.append(r)
+
+            mask = state.inlier_masks[i]
+            if mask is None:
+                inlier_norms.append(np.linalg.norm(r, axis=1))
+            else:
+                inlier_norms.append(np.linalg.norm(r[mask], axis=1))
+
+        all_inlier_norms = np.concatenate(inlier_norms)
+        mean_reproj = float(np.mean(all_inlier_norms))
+        worst_reproj = float(np.max(all_inlier_norms))
+        log(
+            f"{label} pass {pass_num}: {elapsed:.1f}s "
+            f"(mean reproj={mean_reproj:.3f}px, worst={worst_reproj:.3f}px)"
+        )
+
+        if outlier_threshold_stddevs is None or iteration == MAX_OUTLIER_FILTER_PASSES:
+            break
 
         new_active_masks = _filter_outliers(residuals, outlier_threshold_stddevs)
 
@@ -404,10 +464,8 @@ def _stereographic_pixels_to_normalized_xy(
     """
     sx = (pixel_coords[:, 0] - cx) / focal_length
     sy = (pixel_coords[:, 1] - cy) / focal_length
-    r_s = np.sqrt(sx * sx + sy * sy + 1e-30)
-    theta = 2.0 * np.arctan(r_s / 2.0)
-    r_n = np.tan(theta)
-    scale = r_n / r_s
+    r_s_sq = sx * sx + sy * sy
+    scale = 1.0 / (1.0 - 0.25 * r_s_sq)
     return np.column_stack([sx * scale, sy * scale])
 
 
@@ -428,14 +486,145 @@ def _project_stereographic_points(
     Returns:
         Image coordinates, shape (N, 2).
     """
-    normalized_x = points_in_camera[:, 0] / points_in_camera[:, 2]
-    normalized_y = points_in_camera[:, 1] / points_in_camera[:, 2]
-    r_n = np.sqrt(normalized_x * normalized_x + normalized_y * normalized_y + 1e-30)
-    theta = np.arctan(r_n)
-    scale = 2.0 * np.tan(theta / 2.0) / r_n
-    sx = normalized_x * scale
-    sy = normalized_y * scale
+    ray_norm = np.linalg.norm(points_in_camera, axis=1)
+    denominator = ray_norm + points_in_camera[:, 2]
+    sx = 2.0 * points_in_camera[:, 0] / denominator
+    sy = 2.0 * points_in_camera[:, 1] / denominator
     return np.column_stack([focal_length * sx + cx, focal_length * sy + cy])
+
+
+def _project_raw_stereographic_points(
+    points_in_camera: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+) -> np.ndarray:
+    """Project camera-frame points with a raw stereographic model.
+
+    Args:
+        points_in_camera: Camera-frame target points, shape (N, 3).
+        fx: Focal length along x.
+        fy: Focal length along y.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Image coordinates, shape (N, 2).
+    """
+    ray_norm = np.linalg.norm(points_in_camera, axis=1)
+    denominator = ray_norm + points_in_camera[:, 2]
+    sx = 2.0 * points_in_camera[:, 0] / denominator
+    sy = 2.0 * points_in_camera[:, 1] / denominator
+    return np.column_stack([fx * sx + cx, fy * sy + cy])
+
+
+def _stereographic_front_mask(
+    pixel_coords: np.ndarray,
+    focal_length: float,
+    cx: float,
+    cy: float,
+) -> np.ndarray:
+    """Select well-conditioned front-hemisphere points for pinhole PnP.
+
+    Args:
+        pixel_coords: Image coordinates, shape (N, 2).
+        focal_length: Centered stereographic focal length.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Boolean selection mask, shape (N,).
+    """
+    sx = (pixel_coords[:, 0] - cx) / focal_length
+    sy = (pixel_coords[:, 1] - cy) / focal_length
+    return sx * sx + sy * sy < 3.6
+
+
+def _prepare_pnp_frame_data(
+    target_points: np.ndarray,
+    frames: list[Frame],
+) -> list[_PnPFrameData]:
+    """Gather contiguous object and image arrays for repeated PnP solves.
+
+    Args:
+        target_points: Calibration target 3D points, shape (N, 3).
+        frames: Detected calibration frames.
+
+    Returns:
+        Per-frame object points and image detections.
+    """
+    return [
+        _PnPFrameData(
+            object_points=np.ascontiguousarray(
+                target_points[frame.target_point_indices],
+                dtype=np.float64,
+            ),
+            image_points=np.ascontiguousarray(
+                frame.detected_points_in_image,
+                dtype=np.float64,
+            ),
+        )
+        for frame in frames
+    ]
+
+
+def _score_stereographic_focal_length(
+    focal_length: float,
+    pnp_frames: list[_PnPFrameData],
+    cx: float,
+    cy: float,
+) -> float:
+    """Score a centered stereographic focal length with PnP reprojection error.
+
+    Args:
+        focal_length: Centered stereographic focal length.
+        pnp_frames: Prepared frame data.
+        cx: Principal point x coordinate.
+        cy: Principal point y coordinate.
+
+    Returns:
+        Mean squared reprojection error per solved target point.
+    """
+    normalized_K = np.eye(3, dtype=np.float64)
+    zero_distortion = np.zeros(4, dtype=np.float64)
+    total_squared_error = 0.0
+    total_points = 0
+
+    for frame_data in pnp_frames:
+        obj_pts = frame_data.object_points
+        img_pts = frame_data.image_points
+        if len(obj_pts) < 4:
+            continue
+
+        pnp_mask = _stereographic_front_mask(img_pts, focal_length, cx, cy)
+        if np.count_nonzero(pnp_mask) < 4:
+            continue
+
+        normalized_xy = _stereographic_pixels_to_normalized_xy(
+            img_pts[pnp_mask],
+            focal_length,
+            cx,
+            cy,
+        )
+        success, rvec, tvec = cv2.solvePnP(
+            obj_pts[pnp_mask],
+            normalized_xy,
+            normalized_K,
+            zero_distortion,
+        )
+        if not success:
+            continue
+
+        rotmat = cv2.Rodrigues(rvec)[0]
+        points_in_cam = obj_pts @ rotmat.T + tvec.reshape(1, 3)
+        projected = _project_stereographic_points(points_in_cam, focal_length, cx, cy)
+        total_squared_error += float(np.sum((projected - img_pts) ** 2))
+        total_points += len(obj_pts)
+
+    if total_points == 0:
+        return float("inf")
+    return total_squared_error / total_points
 
 
 def _solve_pnp_all_frames_stereographic(
@@ -479,14 +668,25 @@ def _solve_pnp_all_frames_stereographic(
             solved.append(False)
             continue
 
-        normalized_xy = _stereographic_pixels_to_normalized_xy(
+        pnp_mask = _stereographic_front_mask(
             img_pts,
             focal_length,
             cx,
             cy,
         )
+        if np.count_nonzero(pnp_mask) < 4:
+            poses.append(Pose.identity())
+            solved.append(False)
+            continue
+
+        normalized_xy = _stereographic_pixels_to_normalized_xy(
+            img_pts[pnp_mask],
+            focal_length,
+            cx,
+            cy,
+        )
         success, rvec, tvec = cv2.solvePnP(
-            obj_pts,
+            obj_pts[pnp_mask],
             normalized_xy,
             normalized_K,
             zero_distortion,
@@ -545,7 +745,7 @@ def _matching_opencv_model_from_stereographic(
 
 
 def _solve_pnp_all_frames_with_model(
-    model: OpenCV | PinholeSplined,
+    model: OpenCV | PinholeSplined | _RawStereographicSeed,
     target_points: np.ndarray,
     frames: list[Frame],
 ) -> tuple[list[Pose], list[bool], float]:
@@ -575,8 +775,16 @@ def _solve_pnp_all_frames_with_model(
         normalized_points_in_camera = model.normalize_points(
             frame.detected_points_in_image
         )
+        pnp_mask = normalized_points_in_camera[:, 2] > 0.0
+        if np.count_nonzero(pnp_mask) < 4:
+            cameras_from_target.append(Pose.identity())
+            solved.append(False)
+            continue
+
+        pnp_rays = normalized_points_in_camera[pnp_mask]
+        z = pnp_rays[:, 2:3]
         normalized_xy = np.ascontiguousarray(
-            normalized_points_in_camera[:, :2],
+            pnp_rays[:, :2] / z,
             dtype=np.float64,
         )
 
@@ -586,7 +794,7 @@ def _solve_pnp_all_frames_with_model(
             continue
 
         success, rvec, tvec = cv2.solvePnP(
-            obj_pts,
+            obj_pts[pnp_mask],
             normalized_xy,
             normalized_K,
             zero_distortion,
@@ -612,6 +820,56 @@ def _solve_pnp_all_frames_with_model(
     if total_points > 0:
         mean_error = total_squared_error / total_points
     return cameras_from_target, solved, mean_error
+
+
+def _estimate_raw_stereographic_focal_length(
+    image_width: int,
+    image_height: int,
+    initial_focal_length: float | None,
+    target_points: np.ndarray,
+    frames: list[Frame],
+) -> float:
+    """Estimate a centered raw stereographic focal length for PnP startup.
+
+    Args:
+        image_width: Image width in pixels.
+        image_height: Image height in pixels.
+        initial_focal_length: Optional focal length to use directly.
+        target_points: Calibration target 3D points, shape (N, 3).
+        frames: Detected calibration frames.
+
+    Returns:
+        Centered stereographic focal length.
+    """
+    if initial_focal_length is not None:
+        return float(initial_focal_length)
+
+    cx = image_width / 2.0
+    cy = image_height / 2.0
+    max_dim = max(image_width, image_height)
+    candidates = np.geomspace(0.2 * max_dim, 5.0 * max_dim, num=30)
+    sweep_frames = _select_focal_sweep_frames(
+        frames,
+        image_width,
+        image_height,
+    )
+    sweep_pnp_frames = _prepare_pnp_frame_data(target_points, sweep_frames)
+
+    best_focal = float(candidates[0])
+    best_error = float("inf")
+
+    for f in candidates:
+        error = _score_stereographic_focal_length(
+            float(f),
+            sweep_pnp_frames,
+            cx,
+            cy,
+        )
+        if error < best_error:
+            best_error = error
+            best_focal = float(f)
+
+    return best_focal
 
 
 def _get_initial_state_with_pnp(
@@ -648,44 +906,25 @@ def _get_initial_state_with_pnp(
     cx = config.image_width / 2.0
     cy = config.image_height / 2.0
 
-    if config.initial_focal_length is not None:
-        focal_length = float(config.initial_focal_length)
-        poses, solved, _ = _solve_pnp_all_frames_stereographic(
-            focal_length,
-            target_points,
-            frames,
-            cx,
-            cy,
-        )
-        intrinsics = _matching_opencv_model_from_stereographic(config, focal_length)
-        return intrinsics, poses, solved
+    focal_length = _estimate_raw_stereographic_focal_length(
+        config.image_width,
+        config.image_height,
+        config.initial_focal_length,
+        target_points,
+        frames,
+    )
+    if config.initial_focal_length is None:
+        log(f"Auto-estimated initial stereographic focal length: {focal_length:.1f} px")
 
-    max_dim = max(config.image_width, config.image_height)
-    candidates = np.geomspace(0.2 * max_dim, 5.0 * max_dim, num=30)
-
-    best_focal = float(candidates[0])
-    best_error = float("inf")
-    best_poses: list[Pose] = []
-    best_solved: list[bool] = []
-
-    for f in candidates:
-        poses, solved, error = _solve_pnp_all_frames_stereographic(
-            float(f),
-            target_points,
-            frames,
-            cx,
-            cy,
-        )
-        if error < best_error:
-            best_error = error
-            best_focal = float(f)
-            best_poses = poses
-            best_solved = solved
-
-    log(f"Auto-estimated initial stereographic focal length: {best_focal:.1f} px")
-
-    intrinsics = _matching_opencv_model_from_stereographic(config, best_focal)
-    return intrinsics, best_poses, best_solved
+    poses, solved, _ = _solve_pnp_all_frames_stereographic(
+        focal_length,
+        target_points,
+        frames,
+        cx,
+        cy,
+    )
+    intrinsics = _matching_opencv_model_from_stereographic(config, focal_length)
+    return intrinsics, poses, solved
 
 
 _PLANARITY_RATIO_THRESHOLD = 0.1
@@ -911,6 +1150,7 @@ def _opencv_calibrate(
         frame_diagnostics=diagnostics,
         frames=list(frames),
         target_points=target_points,
+        calibration_config=config,
         target_warp=target_warp,
     )
 
@@ -960,27 +1200,6 @@ def _pinhole_splined_refine_inner(
         ],
         frames=batch.frames,
         warp_coeffs=out_coeffs,
-    )
-
-
-def _compute_fov_from_opencv(
-    opencv_model: OpenCV,
-    padding_fraction: float = 0.05,
-    max_fov_deg: float = 175.0,
-) -> tuple[float, float]:
-    """Compute the spline FOV from an OpenCV model with percentage padding.
-
-    Args:
-        opencv_model: Seed OpenCV camera model.
-        padding_fraction: Fractional padding to add to each FOV axis.
-        max_fov_deg: Maximum allowed FOV to avoid singularities near 180 degrees.
-
-    Returns:
-        Padded (fov_deg_x, fov_deg_y), capped at max_fov_deg.
-    """
-    return (
-        min(opencv_model.fov_deg_x * (1 + padding_fraction), max_fov_deg),
-        min(opencv_model.fov_deg_y * (1 + padding_fraction), max_fov_deg),
     )
 
 
@@ -1061,207 +1280,276 @@ def _select_covering_frames(
     return selected
 
 
-def _compute_fov_from_spline_model(
-    model: PinholeSplined,
-    padding_fraction: float = 0.05,
-    max_fov_deg: float = 175.0,
-) -> tuple[float, float]:
-    """Compute FOV by unprojecting the image corners through the spline model.
+def _select_focal_sweep_frames(
+    frames: list[Frame],
+    image_width: int,
+    image_height: int,
+    max_frames: int = FOCAL_SWEEP_MAX_FRAMES,
+) -> list[Frame]:
+    """Select frames used for initial focal-length sweeps.
 
     Args:
-        model: Fitted spline model.
-        padding_fraction: Fractional padding to add to each FOV axis.
-        max_fov_deg: Maximum allowed FOV.
+        frames: Input calibration frames.
+        image_width: Image width in pixels.
+        image_height: Image height in pixels.
+        max_frames: Maximum number of frames to keep.
 
     Returns:
-        Padded (fov_deg_x, fov_deg_y), capped at max_fov_deg.
+        Coverage-selected frames, or all frames if the input is already small.
     """
-    w, h = float(model.image_width), float(model.image_height)
-    n = 50
+    if len(frames) <= max_frames:
+        return frames
+
+    sub_indices = _select_covering_frames(
+        frames,
+        image_width,
+        image_height,
+        max_frames=max_frames,
+    )
+    return [frames[i] for i in sub_indices]
+
+
+def _compute_spline_grid_fov_from_raw_seed(
+    seed_model: _RawStereographicSeed,
+    max_fov_deg: float = 175.0,
+) -> tuple[float, float]:
+    """Compute spline-grid FOV from image-border stereographic coordinates.
+
+    Args:
+        seed_model: Raw stereographic seed.
+        max_fov_deg: Maximum allowed grid FOV.
+
+    Returns:
+        Symmetric (fov_deg_x, fov_deg_y) covering the image border, capped at
+        max_fov_deg.
+    """
+    w, h = float(seed_model.image_width), float(seed_model.image_height)
+    n = 80
     t = np.linspace(0, 1, n)
     edges = np.concatenate(
         [
-            np.column_stack([t * w, np.zeros(n)]),  # top
-            np.column_stack([t * w, np.full(n, h)]),  # bottom
-            np.column_stack([np.zeros(n), t * h]),  # left
-            np.column_stack([np.full(n, w), t * h]),  # right
+            np.column_stack([t * w, np.zeros(n)]),
+            np.column_stack([t * w, np.full(n, h)]),
+            np.column_stack([np.zeros(n), t * h]),
+            np.column_stack([np.full(n, w), t * h]),
         ]
     )
-    normalized = model.normalize_points(edges)
-    half_x = float(np.abs(normalized[:, 0]).max())
-    half_y = float(np.abs(normalized[:, 1]).max())
+    rays = seed_model.normalize_points(edges)
+    denominator = 1.0 + rays[:, 2]
+    stereographic_x = 2.0 * rays[:, 0] / denominator
+    stereographic_y = 2.0 * rays[:, 1] / denominator
+    half_x = float(np.max(np.abs(stereographic_x)))
+    half_y = float(np.max(np.abs(stereographic_y)))
+    fov_x = float(np.degrees(4.0 * np.arctan(half_x / 2.0)))
+    fov_y = float(np.degrees(4.0 * np.arctan(half_y / 2.0)))
+    return min(fov_x, max_fov_deg), min(fov_y, max_fov_deg)
 
-    fov_x = float(np.degrees(2 * np.arctan(half_x * (1 + padding_fraction))))
-    fov_y = float(np.degrees(2 * np.arctan(half_y * (1 + padding_fraction))))
 
-    return (min(fov_x, max_fov_deg), min(fov_y, max_fov_deg))
+def _compute_spline_fov_from_seed_coverage(
+    seed_model: _RawStereographicSeed,
+    cameras_from_target: list[Pose],
+    pnp_solved_mask: list[bool],
+    target_points: np.ndarray,
+    frames: list[Frame],
+    max_fov_deg: float,
+) -> tuple[float, float]:
+    """Compute grid support from the raw seed border and observed target rays.
+
+    Args:
+        seed_model: Raw stereographic seed.
+        cameras_from_target: Camera-from-target transforms from seed-model PnP.
+        pnp_solved_mask: Per-frame PnP success mask.
+        target_points: Calibration target 3D points, shape (N, 3).
+        frames: All calibration frames.
+        max_fov_deg: Maximum grid FOV on either axis.
+
+    Returns:
+        Grid FOV covering both the seed image border and observed target rays.
+    """
+    fov_x, fov_y = _compute_spline_grid_fov_from_raw_seed(
+        seed_model,
+        max_fov_deg=max_fov_deg,
+    )
+    stereographic_points: list[np.ndarray] = []
+    for frame, camera_from_target, solved in zip(
+        frames,
+        cameras_from_target,
+        pnp_solved_mask,
+    ):
+        if not solved:
+            continue
+        points_in_camera = camera_from_target.apply(
+            target_points[frame.target_point_indices]
+        )
+        rays = points_in_camera / np.linalg.norm(points_in_camera, axis=1, keepdims=True)
+        denominator = 1.0 + rays[:, 2:3]
+        stereographic_points.append(2.0 * rays[:, :2] / denominator)
+
+    if not stereographic_points:
+        return fov_x, fov_y
+
+    coverage = np.concatenate(stereographic_points)
+    tolerance = 1.03
+    half_x = float(np.max(np.abs(coverage[:, 0]))) * tolerance
+    half_y = float(np.max(np.abs(coverage[:, 1]))) * tolerance
+    coverage_fov_x = float(np.degrees(4.0 * np.arctan(half_x / 2.0)))
+    coverage_fov_y = float(np.degrees(4.0 * np.arctan(half_y / 2.0)))
+    return (
+        min(max(fov_x, coverage_fov_x), max_fov_deg),
+        min(max(fov_y, coverage_fov_y), max_fov_deg),
+    )
 
 
-def _fit_opencv_seed(
+def _fit_raw_stereographic_seed(
     target_points: np.ndarray,
     frames: list[Frame],
     config: PinholeSplinedConfig,
-) -> tuple[CalibrationResult[OpenCV], list[int]]:
-    """Fit an OpenCV seed model on a coverage-subsampled set of frames.
+) -> _RawStereographicSeed:
+    """Fit a private distortion-free stereographic seed.
 
     Args:
-        target_points: 3D target points, shape (N, 3).
+        target_points: Calibration target 3D points, shape (N, 3).
         frames: All calibration frames.
-        config: Spline config (used for image size and initial focal length).
+        config: Spline config used for image size and initial focal length.
 
     Returns:
-        Tuple of (calibration result, indices of subsampled frames).
+        Raw stereographic seed for spline bootstrap.
     """
     start_time = default_timer()
-    sub_indices = _select_covering_frames(frames, config.image_width, config.image_height)
-    subsampled_frames = [frames[i] for i in sub_indices]
-
-    opencv_config = OpenCVConfig(
-        image_height=config.image_height,
-        image_width=config.image_width,
-        initial_focal_length=config.initial_focal_length,
-        included_distortion_coefficients=OpenCVConfig.FULL_14,
-    )
-
-    disable_logs()
-    try:
-        result = _opencv_calibrate(
-            target_points,
-            subsampled_frames,
-            opencv_config,
-            None,
-            estimate_target_warp=False,
-        )
-    finally:
-        enable_logs()
-    fov_x, fov_y = _compute_fov_from_opencv(result.camera_model, padding_fraction=0.0)
-    log(
-        f"Fitted OpenCV seed model: {default_timer() - start_time:.1f}s "
-        f"(FOV: {fov_x:.1f}° x {fov_y:.1f}°)"
-    )
-    return result, sub_indices
-
-
-def _estimate_spline_fov(
-    opencv_model: OpenCV,
-    opencv_result: CalibrationResult[OpenCV],
-    frames: list[Frame],
-    sub_indices: list[int],
-    target_points: np.ndarray,
-    config: PinholeSplinedConfig,
-    opencv_fov_x: float,
-    opencv_fov_y: float,
-) -> tuple[float, float]:
-    """Estimate the spline FOV by fitting a coarse spline and unprojecting image edges.
-
-    Args:
-        opencv_model: Seed OpenCV model.
-        opencv_result: Calibration result from the seed model.
-        frames: All calibration frames.
-        sub_indices: Indices of subsampled frames used for the seed model.
-        target_points: 3D target points, shape (N, 3).
-        config: Spline config.
-        opencv_fov_x: OpenCV model's FOV in x (no padding).
-        opencv_fov_y: OpenCV model's FOV in y (no padding).
-
-    Returns:
-        Estimated (fov_deg_x, fov_deg_y) for the full spline model.
-    """
-    coarse_fov_x, coarse_fov_y = _compute_fov_from_opencv(
-        opencv_model, padding_fraction=0.30
-    )
-
-    coarse_nx = min(config.num_knots_x, 10)
-    coarse_ny = min(config.num_knots_y, 8)
-    coarse_cpp_config = lbb.PinholeSplinedOptimizationConfig(
+    seed_indices = _select_covering_frames(
+        frames,
         config.image_width,
         config.image_height,
-        coarse_fov_x,
-        coarse_fov_y,
-        coarse_nx,
-        coarse_ny,
-        1.0,  # strong smoothness for coarse model
+        max_frames=SEED_FIT_MAX_FRAMES,
     )
-
-    coarse_image_bound_x = np.tan(np.deg2rad(opencv_fov_x) / 2.0) * 0.8
-    coarse_image_bound_y = np.tan(np.deg2rad(opencv_fov_y) / 2.0) * 0.8
-    coarse_out = lbb.get_matching_spline_distortion_model(
-        opencv_model.distortion_coeffs.tolist(),
-        coarse_cpp_config,
-        float(coarse_image_bound_x),
-        float(coarse_image_bound_y),
+    seed_frames = [frames[index] for index in seed_indices]
+    focal_length = _estimate_raw_stereographic_focal_length(
+        config.image_width,
+        config.image_height,
+        config.initial_focal_length,
+        target_points,
+        seed_frames,
     )
-
-    coarse_model = PinholeSplined(
+    seed_model = _RawStereographicSeed(
         image_height=config.image_height,
         image_width=config.image_width,
-        fx=opencv_model.fx,
-        fy=opencv_model.fy,
-        cx=opencv_model.cx,
-        cy=opencv_model.cy,
-        dx_grid=coarse_out["x_knots"],
-        dy_grid=coarse_out["y_knots"],
-        num_knots_x=coarse_nx,
-        num_knots_y=coarse_ny,
-        fov_deg_x=coarse_fov_x,
-        fov_deg_y=coarse_fov_y,
+        fx=focal_length,
+        fy=focal_length,
+        cx=config.image_width / 2.0,
+        cy=config.image_height / 2.0,
     )
 
-    all_pnp = opencv_result.cameras_from_target
-    sub_frames = [frames[i] for i in sub_indices]
-    solved_poses = [p for p in all_pnp if p is not None]
-    solved_frames = [f for f, p in zip(sub_frames, all_pnp) if p is not None]
+    seed_poses, seed_solved, _ = _solve_pnp_all_frames_stereographic(
+        focal_length,
+        target_points,
+        seed_frames,
+        seed_model.cx,
+        seed_model.cy,
+    )
+    solved_seed_frames: list[Frame] = []
+    solved_seed_poses: list[Pose] = []
+    for frame, camera_from_target, solved in zip(
+        seed_frames,
+        seed_poses,
+        seed_solved,
+    ):
+        if not solved:
+            continue
+        solved_seed_frames.append(frame)
+        solved_seed_poses.append(camera_from_target)
 
-    start_time = default_timer()
-    coarse_result = _pinhole_splined_refine_inner(
-        _OptimizationBatch(
-            intrinsics=coarse_model,
-            cameras_from_target=solved_poses,
-            frames=solved_frames,
-            warp_coeffs=None,
-        ),
-        PinholeSplinedConfig(
+    if solved_seed_frames:
+        seed_result = lbb.calibrate_raw_stereographic(
+            intrinsics_initial_value=[
+                seed_model.fx,
+                seed_model.fy,
+                seed_model.cx,
+                seed_model.cy,
+            ],
+            intrinsics_param_optimize_mask=[True, True, True, True],
+            cameras_from_target=[
+                camera_from_target._to_cpp()
+                for camera_from_target in solved_seed_poses
+            ],
+            target_points=list(target_points),
+            frames=[frame._to_cpp() for frame in solved_seed_frames],
+        )
+        seed_params = np.asarray(seed_result["intrinsics"], dtype=np.float64)
+        seed_model = _RawStereographicSeed(
             image_height=config.image_height,
             image_width=config.image_width,
-            num_knots_x=coarse_nx,
-            num_knots_y=coarse_ny,
-            fov_deg_xy=(coarse_fov_x, coarse_fov_y),
-            smoothness_lambda=1.0,
-        ),
-        target_points,
-        None,
-    )
+            fx=float(seed_params[0]),
+            fy=float(seed_params[1]),
+            cx=float(seed_params[2]),
+            cy=float(seed_params[3]),
+        )
 
-    fov_deg_x, fov_deg_y = _compute_fov_from_spline_model(
-        coarse_result.intrinsics, padding_fraction=0.05
-    )
+    fov_x, fov_y = _compute_spline_grid_fov_from_raw_seed(seed_model)
     log(
-        f"Spline FOV estimate: {default_timer() - start_time:.1f}s "
-        f"({fov_deg_x:.1f}° x {fov_deg_y:.1f}°)"
+        f"Fitted raw stereographic seed: {default_timer() - start_time:.1f}s "
+        f"(FOV: {fov_x:.1f}° x {fov_y:.1f}°)"
     )
-    return fov_deg_x, fov_deg_y
+    return seed_model
+
+
+def _prepare_spline_frame_state(
+    all_poses_pnp: list[Pose],
+    pnp_solved_mask: list[bool],
+    frames: list[Frame],
+    target_points: np.ndarray,
+    estimate_target_warp: bool,
+) -> tuple[
+    list[Pose | None],
+    list[np.ndarray | None],
+    WarpCoordinates | None,
+]:
+    """Prepare per-frame state shared by spline optimization paths.
+
+    Args:
+        all_poses_pnp: Camera-from-target transforms from PnP.
+        pnp_solved_mask: Per-frame PnP success mask.
+        frames: All calibration frames.
+        target_points: Calibration target 3D points, shape (N, 3).
+        estimate_target_warp: Whether to estimate target warp.
+
+    Returns:
+        Optional poses, initial inlier masks, and optional warp coordinates.
+    """
+    n_solved = sum(pnp_solved_mask)
+    log(f"PnP solved {n_solved}/{len(frames)} frames")
+
+    poses: list[Pose | None] = []
+    inlier_masks: list[np.ndarray | None] = []
+    for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
+        if ok:
+            poses.append(camera_from_target)
+            inlier_masks.append(np.ones(len(frame), dtype=bool))
+            continue
+        poses.append(None)
+        inlier_masks.append(None)
+
+    warp_coordinates = None
+    if estimate_target_warp:
+        warp_coordinates = _make_warp_coordinates(target_points)
+    return poses, inlier_masks, warp_coordinates
 
 
 def _build_initial_spline_model(
-    opencv_model: OpenCV,
+    seed_model: _RawStereographicSeed,
     config: PinholeSplinedConfig,
     fov_deg_x: float,
     fov_deg_y: float,
-    opencv_fov_x: float,
-    opencv_fov_y: float,
 ) -> PinholeSplined:
-    """Build the initial spline model by matching the OpenCV distortion.
+    """Build the initial spline model by matching raw stereographic projection.
 
     Args:
-        opencv_model: Seed OpenCV model.
+        seed_model: Raw stereographic seed.
         config: Spline config.
         fov_deg_x: Target FOV in x for the spline grid.
         fov_deg_y: Target FOV in y for the spline grid.
-        opencv_fov_x: OpenCV model's FOV in x (no padding).
-        opencv_fov_y: OpenCV model's FOV in y (no padding).
 
     Returns:
-        Initial PinholeSplined model with knots matched to the OpenCV distortion.
+        Initial model with knots matched to stereographic projection.
     """
     cpp_config = lbb.PinholeSplinedOptimizationConfig(
         config.image_width,
@@ -1273,13 +1561,10 @@ def _build_initial_spline_model(
         config.smoothness_lambda,
     )
 
-    matching_bounds_fov_x = min(fov_deg_x, opencv_fov_x)
-    matching_bounds_fov_y = min(fov_deg_y, opencv_fov_y)
-    image_bound_x = np.tan(np.deg2rad(matching_bounds_fov_x) / 2.0) * 0.8
-    image_bound_y = np.tan(np.deg2rad(matching_bounds_fov_y) / 2.0) * 0.8
+    image_bound_x = np.tan(np.deg2rad(fov_deg_x) / 2.0) * 0.8
+    image_bound_y = np.tan(np.deg2rad(fov_deg_y) / 2.0) * 0.8
 
-    out_dict = lbb.get_matching_spline_distortion_model(
-        opencv_model.distortion_coeffs.tolist(),
+    out_dict = lbb.get_matching_stereographic_spline_distortion_model(
         cpp_config,
         float(image_bound_x),
         float(image_bound_y),
@@ -1288,10 +1573,10 @@ def _build_initial_spline_model(
     return PinholeSplined(
         image_height=config.image_height,
         image_width=config.image_width,
-        fx=opencv_model.fx,
-        fy=opencv_model.fy,
-        cx=opencv_model.cx,
-        cy=opencv_model.cy,
+        fx=seed_model.fx,
+        fy=seed_model.fy,
+        cx=seed_model.cx,
+        cy=seed_model.cy,
         dx_grid=out_dict["x_knots"],
         dy_grid=out_dict["y_knots"],
         num_knots_x=config.num_knots_x,
@@ -1317,71 +1602,53 @@ def _calibrate_pinhole_splined(
     )
 
     if initial_camera_model is None:
-        # Stage 1: Fit OpenCV seed on subsampled frames
-        opencv_result, sub_indices = _fit_opencv_seed(target_points, frames, config)
-        opencv_model = opencv_result.camera_model
-
-        opencv_fov_x, opencv_fov_y = _compute_fov_from_opencv(
-            opencv_model, padding_fraction=0.0
+        seed_model = _fit_raw_stereographic_seed(target_points, frames, config)
+        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
+            seed_model,
+            target_points,
+            frames,
         )
 
-        # Stage 2: Determine spline FOV
         if config.fov_deg_xy is not None:
             fov_deg_x, fov_deg_y = config.fov_deg_xy
             log(f"Spline FOV (user-specified): {fov_deg_x:.1f}° x {fov_deg_y:.1f}°")
         else:
-            fov_deg_x, fov_deg_y = _estimate_spline_fov(
-                opencv_model,
-                opencv_result,
-                frames,
-                sub_indices,
+            fov_deg_x, fov_deg_y = _compute_spline_fov_from_seed_coverage(
+                seed_model,
+                all_poses_pnp,
+                pnp_solved_mask,
                 target_points,
-                config,
-                opencv_fov_x,
-                opencv_fov_y,
+                frames,
+                max_fov_deg=175.0,
+            )
+            log(
+                f"Spline FOV from raw stereographic seed: "
+                f"{fov_deg_x:.1f}° x {fov_deg_y:.1f}°"
             )
 
-        # Stage 3: Build full spline model
         prior_model = _build_initial_spline_model(
-            opencv_model,
+            seed_model,
             config,
             fov_deg_x,
             fov_deg_y,
-            opencv_fov_x,
-            opencv_fov_y,
-        )
-
-        all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames(
-            opencv_model.K(),
-            target_points,
-            frames,
-            dist_coeffs=opencv_model.distortion_coeffs,
         )
     else:
         prior_model = initial_camera_model
         log("Using user-provided initial spline model")
+        seed_model = _fit_raw_stereographic_seed(target_points, frames, config)
         all_poses_pnp, pnp_solved_mask, _ = _solve_pnp_all_frames_with_model(
-            prior_model,
+            seed_model,
             target_points,
             frames,
         )
 
-    n_solved = sum(pnp_solved_mask)
-    log(f"PnP solved {n_solved}/{len(frames)} frames")
-
-    poses: list[Pose | None] = []
-    inlier_masks: list[np.ndarray | None] = []
-    for frame, camera_from_target, ok in zip(frames, all_poses_pnp, pnp_solved_mask):
-        if ok:
-            poses.append(camera_from_target)
-            inlier_masks.append(np.ones(len(frame), dtype=bool))
-            continue
-        poses.append(None)
-        inlier_masks.append(None)
-
-    warp_coordinates = None
-    if estimate_target_warp:
-        warp_coordinates = _make_warp_coordinates(target_points)
+    poses, inlier_masks, warp_coordinates = _prepare_spline_frame_state(
+        all_poses_pnp,
+        pnp_solved_mask,
+        frames,
+        target_points,
+        estimate_target_warp,
+    )
 
     def optimize_fn(
         batch: _OptimizationBatch[PinholeSplined],
@@ -1425,6 +1692,7 @@ def _calibrate_pinhole_splined(
         frame_diagnostics=diagnostics,
         frames=list(frames),
         target_points=target_points,
+        calibration_config=config,
         target_warp=target_warp,
     )
 
