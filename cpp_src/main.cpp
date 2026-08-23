@@ -247,6 +247,14 @@ PYBIND11_MODULE(
     );
 
     m.def(
+        "get_matching_stereographic_spline_distortion_model",
+        &lensboy::get_matching_stereographic_spline_distortion_model,
+        py::arg("model_config"),
+        py::arg("image_bound_x"),
+        py::arg("image_bound_y")
+    );
+
+    m.def(
         "get_matching_stereographic_opencv_model",
         &lensboy::get_matching_stereographic_opencv_model,
         py::arg("image_width"),

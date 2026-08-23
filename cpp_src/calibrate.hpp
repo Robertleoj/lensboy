@@ -30,6 +30,12 @@ py::dict get_matching_spline_distortion_model(
     double image_bound_y
 );
 
+py::dict get_matching_stereographic_spline_distortion_model(
+    PinholeSplinedOptimizationConfig& model_config,
+    double image_bound_x,
+    double image_bound_y
+);
+
 py::dict get_matching_stereographic_opencv_model(
     uint32_t image_width,
     uint32_t image_height,
